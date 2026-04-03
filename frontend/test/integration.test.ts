@@ -45,6 +45,29 @@ async function browseEntries(baseUrl: string): Promise<FileEntry[]> {
   return data.entries;
 }
 
+async function pullEntries(ws: WsBrowserClient, entries: FileEntry[]): Promise<void> {
+  for (const entry of entries) {
+    const id = crypto.randomUUID();
+    const timeoutMs = (entry.size > 50_000_000 || entry.is_dir) ? 120_000 : 60_000;
+
+    const transferDone = ws.waitForTransferComplete(id, timeoutMs);
+
+    ws.send({
+      type: 'TransferRequest',
+      id,
+      entries: [{
+        relative_path: entry.name,
+        size: entry.size,
+        is_dir: entry.is_dir,
+        permissions: entry.permissions,
+      }],
+      direction: 'Pull',
+    });
+
+    await transferDone;
+  }
+}
+
 async function pushEntries(ws: WsBrowserClient, entries: FileEntry[]): Promise<void> {
   for (const entry of entries) {
     const id = crypto.randomUUID();
@@ -172,7 +195,40 @@ describe('drift integration', () => {
     }
   }, 30_000);
 
-  it('pushes host files/folders to client', async () => {
+  // Pull tests run first to avoid the frame channel being saturated by push data.
+  // Pulls don't depend on push — the files already exist on their origin side.
+
+  it('pulls host files to client via browser on client', async () => {
+    const ws = await WsBrowserClient.connect(client.wsUrl);
+    try {
+      await pullEntries(ws, hostEntries);
+    } finally {
+      ws.close();
+    }
+
+    const clientDir = path.join(TEST_RESOURCES, 'client');
+    const clientAfter = await waitForChecksums(clientDir, hostChecksums);
+    for (const [rel, md5] of hostChecksums) {
+      expect(clientAfter.get(rel), `pull: host file "${rel}" missing from client`).toBe(md5);
+    }
+  }, 120_000);
+
+  it('pulls client files to host via browser on host', async () => {
+    const ws = await WsBrowserClient.connect(host.wsUrl);
+    try {
+      await pullEntries(ws, clientEntries);
+    } finally {
+      ws.close();
+    }
+
+    const hostDir = path.join(TEST_RESOURCES, 'host');
+    const hostAfter = await waitForChecksums(hostDir, clientChecksums);
+    for (const [rel, md5] of clientChecksums) {
+      expect(hostAfter.get(rel), `pull: client file "${rel}" missing from host`).toBe(md5);
+    }
+  }, 120_000);
+
+  it('pushes host files to client', async () => {
     const ws = await WsBrowserClient.connect(host.wsUrl);
     try {
       await pushEntries(ws, hostEntries);

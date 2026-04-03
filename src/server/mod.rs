@@ -23,15 +23,21 @@ pub struct AppState {
 
 pub type ResponseChannel = oneshot::Sender<ControlMessage>;
 pub type RequestChannel = mpsc::UnboundedSender<(ControlMessage, ResponseChannel)>;
-pub type BinaryChannel = mpsc::UnboundedSender<Vec<u8>>;
-pub type OutgoingChannel = mpsc::UnboundedSender<ControlMessage>;
+
+/// Unified outgoing channel. Carries pre-encoded frames (type byte + payload, NOT yet
+/// encrypted). Both data chunks (`encode_data_frame`) and control messages
+/// (`encode_control_frame`) travel through this single FIFO queue, preserving send
+/// order without priority starvation.
+pub type FrameChannel = mpsc::UnboundedSender<Vec<u8>>;
 
 pub struct RemoteConnection {
     pub hostname: String,
     pub root_dir: String,
+    /// For browser-initiated requests that need a response (e.g. BrowseRequest).
     pub tx: RequestChannel,
-    pub binary_tx: BinaryChannel,
-    pub outgoing_tx: OutgoingChannel,
+    /// Unified outbound: send pre-encoded frames via `encode_data_frame` or
+    /// `encode_control_frame` from `crate::protocol::codec`.
+    pub frame_tx: FrameChannel,
 }
 
 impl AppState {
@@ -56,7 +62,6 @@ pub async fn run(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
 
-    // Get local IP addresses
     let local_ips = get_local_ip_addresses();
     if local_ips.is_empty() {
         tracing::info!("drift server listening on http://localhost:{}", port);
@@ -79,7 +84,6 @@ fn get_local_ip_addresses() -> Vec<std::net::IpAddr> {
 
     let mut ips = Vec::new();
 
-    // Try to get the primary local IP by connecting to a public DNS
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if socket.connect("8.8.8.8:80").is_ok() {
             if let Ok(addr) = socket.local_addr() {

@@ -3,9 +3,12 @@ pub mod send;
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use crate::crypto::{handshake::{KeyPair, decode_public_key, derive_shared_secret}, stream::CryptoStream};
 use crate::protocol::messages::ControlMessage;
+use crate::protocol::codec::{
+    decode_frame_type, decode_data_frame, encode_control_frame,
+    FRAME_TYPE_DATA, FRAME_TYPE_CONTROL,
+};
 use crate::server::{AppState, RemoteConnection, ResponseChannel};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex};
@@ -25,142 +28,75 @@ pub async fn connect_to_remote(
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    // Perform encryption handshake
     let crypto = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
     tracing::info!("Handshake complete, connection encrypted");
 
     let crypto = Arc::new(crypto);
 
-    // Create channel for outgoing control messages (both requests and responses)
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<ControlMessage>();
+    // Single unified outbound channel: pre-encoded frames (type byte + payload).
+    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-    // Create channel for outgoing binary data
-    let (binary_tx, mut binary_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-
-    // Create channel for API requests (from app to remote)
+    // Separate request channel for forwarded browser API requests
     let (request_tx, mut request_rx) = mpsc::unbounded_channel::<(ControlMessage, ResponseChannel)>();
 
-    // Map to track pending responses
     let pending = Arc::new(Mutex::new(HashMap::<Uuid, ResponseChannel>::new()));
     let pending_request = pending.clone();
     let pending_read = pending.clone();
     let crypto_write = crypto.clone();
     let crypto_read = crypto.clone();
     let state_read = state.clone();
-    let outgoing_tx_read = outgoing_tx.clone();
+    let frame_tx_read = frame_tx.clone();
 
-    // Spawn task to handle API requests (convert to outgoing messages with pending)
-    let outgoing_for_request = outgoing_tx.clone();
+    // Request handler: tracks pending responses
+    let frame_tx_request = frame_tx.clone();
     tokio::spawn(async move {
         while let Some((msg, response_tx)) = request_rx.recv().await {
             let id = Uuid::new_v4();
             pending_request.lock().await.insert(id, response_tx);
-            let _ = outgoing_for_request.send(msg);
+            let json = serde_json::to_string(&msg).unwrap();
+            let _ = frame_tx_request.send(encode_control_frame(json.as_bytes()));
         }
     });
 
-    // Spawn task to write outgoing messages to WS (both control and binary)
+    // Write task: encrypt each frame, send as binary WS frame
     let write_task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                // biased: binary data always takes priority over control messages
-                // so that TransferComplete is never sent before pending binary chunks.
-                biased;
-                Some(binary_data) = binary_rx.recv() => {
-                    // Send binary data (encrypted binary frame)
-                    match crypto_write.encrypt(&binary_data) {
-                        Ok(ciphertext) => {
-                            if ws_write.send(Message::Binary(ciphertext.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Binary encryption failed: {}", e);
-                            break;
-                        }
+        while let Some(frame) = frame_rx.recv().await {
+            match crypto_write.encrypt(&frame) {
+                Ok(ciphertext) => {
+                    if ws_write.send(Message::Binary(ciphertext.into())).await.is_err() {
+                        break;
                     }
                 }
-                Some(msg) = outgoing_rx.recv() => {
-                    // Send control message (encrypted text frame)
-                    let json = serde_json::to_string(&msg).unwrap();
-                    match crypto_write.encrypt(json.as_bytes()) {
-                        Ok(ciphertext) => {
-                            let encoded = BASE64.encode(&ciphertext);
-                            if ws_write.send(Message::Text(encoded.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Encryption failed: {}", e);
-                            break;
-                        }
-                    }
+                Err(e) => {
+                    tracing::error!("Encryption failed: {}", e);
+                    break;
                 }
-                else => break,
             }
         }
     });
 
-    // Read messages from WS (both responses to our requests and incoming requests)
+    // Read task: decrypt each binary frame, dispatch by type byte
     let read_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_read.next().await {
             match msg {
-                Message::Text(text) => {
-                    // Decode and decrypt message
-                    let ciphertext = match BASE64.decode(text.as_bytes()) {
-                        Ok(ct) => ct,
-                        Err(e) => {
-                            tracing::error!("Base64 decode failed: {}", e);
-                            break;
-                        }
-                    };
-                    match crypto_read.decrypt(&ciphertext) {
-                        Ok(plaintext) => {
-                            if let Ok(control_msg) = serde_json::from_str::<ControlMessage>(std::str::from_utf8(&plaintext).unwrap_or("")) {
-                                // Check if this is TransferComplete
-                                if let ControlMessage::TransferComplete { id } = control_msg {
-                                    tracing::info!("Received TransferComplete from server: {}", id);
-                                    if let Err(e) = state_read.transfer_receiver.finalize_transfer(id).await {
-                                        tracing::error!("Failed to finalize transfer: {}", e);
-                                    } else {
-                                        tracing::info!("Transfer finalized successfully: {}", id);
-                                    }
-                                }
-
-                                if control_msg.is_request() {
-                                    // Handle incoming request from server
-                                    tracing::debug!("Client handling request from server: {:?}", control_msg);
-                                    if let Some(response) = handle_incoming_request(&state_read, control_msg).await {
-                                        // Send response back via outgoing channel
-                                        let _ = outgoing_tx_read.send(response);
-                                    }
-                                } else {
-                                    // This is a response to our request - forward to pending channel
-                                    let mut pending_lock = pending_read.lock().await;
-                                    if let Some(id) = pending_lock.keys().next().copied() {
-                                        if let Some(response_tx) = pending_lock.remove(&id) {
-                                            let _ = response_tx.send(control_msg);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Decryption failed: {}", e);
-                            break;
-                        }
-                    }
-                }
                 Message::Binary(encrypted_data) => {
-                    // Decrypt binary frame
-                    match crypto_read.decrypt(&encrypted_data) {
-                        Ok(plaintext) => {
-                            // Decode data frame: [16B UUID][8B offset][chunk data]
-                            use crate::protocol::codec::decode_data_frame;
-                            match decode_data_frame(&plaintext) {
+                    let plaintext = match crypto_read.decrypt(&encrypted_data) {
+                        Ok(p) => p,
+                        Err(e) => { tracing::error!("Decryption failed: {}", e); break; }
+                    };
+
+                    let (frame_type, payload) = match decode_frame_type(&plaintext) {
+                        Ok(v) => v,
+                        Err(e) => { tracing::error!("Frame decode failed: {}", e); break; }
+                    };
+
+                    match frame_type {
+                        FRAME_TYPE_DATA => {
+                            match decode_data_frame(payload) {
                                 Ok((transfer_id, offset, chunk)) => {
-                                    // Write chunk to disk
-                                    if let Err(e) = state_read.transfer_receiver.receive_chunk(transfer_id, offset, chunk).await {
+                                    if let Err(e) = state_read.transfer_receiver
+                                        .receive_chunk(transfer_id, offset, chunk).await
+                                    {
                                         tracing::error!("Failed to write chunk: {}", e);
                                         break;
                                     }
@@ -171,12 +107,45 @@ pub async fn connect_to_remote(
                                 }
                             }
                         }
-                        Err(e) => {
-                            tracing::error!("Binary decryption failed: {}", e);
-                            break;
+                        FRAME_TYPE_CONTROL => {
+                            let control_msg = match serde_json::from_slice::<ControlMessage>(payload) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    tracing::error!("Failed to parse control message: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            if let ControlMessage::TransferComplete { id } = control_msg {
+                                tracing::info!("Received TransferComplete from server: {}", id);
+                                if let Err(e) = state_read.transfer_receiver.finalize_transfer(id).await {
+                                    tracing::error!("Failed to finalize transfer: {}", e);
+                                }
+                                continue;
+                            }
+
+                            if control_msg.is_request() {
+                                tracing::debug!("Client handling request from server: {:?}", control_msg);
+                                if let Some(response) = handle_incoming_request(&state_read.clone(), control_msg).await {
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                }
+                            } else {
+                                let mut pending_lock = pending_read.lock().await;
+                                if let Some(id) = pending_lock.keys().next().copied() {
+                                    if let Some(response_tx) = pending_lock.remove(&id) {
+                                        let _ = response_tx.send(control_msg);
+                                    }
+                                }
+                            }
+                        }
+                        other => {
+                            tracing::warn!("Unknown frame type: {:#x}", other);
                         }
                     }
                 }
+                // Handshake text frames only appear before encryption
+                Message::Text(_) => {}
                 Message::Close(_) => break,
                 _ => {}
             }
@@ -190,18 +159,16 @@ pub async fn connect_to_remote(
             hostname: target.to_string(),
             root_dir: "/".to_string(),
             tx: request_tx.clone(),
-            binary_tx: binary_tx.clone(),
-            outgoing_tx: outgoing_tx.clone(),
+            frame_tx: frame_tx.clone(),
         });
     }
 
-    // Send initial InfoRequest to get remote hostname and root_dir
+    // Send InfoRequest to get remote hostname and root_dir
     let (info_tx, info_rx) = tokio::sync::oneshot::channel();
     if request_tx.send((ControlMessage::InfoRequest, info_tx)).is_ok() {
         if let Ok(Ok(ControlMessage::InfoResponse { hostname, root_dir })) =
             tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await
         {
-            // Update remote connection with real info
             let mut remote = state.remote.write().await;
             if let Some(ref mut remote_conn) = *remote {
                 remote_conn.hostname = hostname;
@@ -210,13 +177,11 @@ pub async fn connect_to_remote(
         }
     }
 
-    // Wait for tasks (they run forever until connection drops)
     tokio::select! {
         _ = write_task => {},
         _ = read_task => {},
     }
 
-    // Clear remote on disconnect
     {
         let mut remote = state.remote.write().await;
         *remote = None;
@@ -226,31 +191,24 @@ pub async fn connect_to_remote(
 }
 
 async fn handle_incoming_request(
-    state: &AppState,
+    state: &Arc<AppState>,
     msg: ControlMessage,
 ) -> Option<ControlMessage> {
     match msg {
         ControlMessage::BrowseRequest { path } => {
             match crate::fileops::browse::list_directory(&state.config.root_dir, &path) {
                 Ok(entries) => {
-                    let cwd = state
-                        .config
-                        .root_dir
-                        .join(&path)
+                    let cwd = state.config.root_dir.join(&path)
                         .canonicalize()
                         .unwrap_or_else(|_| state.config.root_dir.clone())
-                        .to_string_lossy()
-                        .to_string();
-
+                        .to_string_lossy().to_string();
                     Some(ControlMessage::BrowseResponse {
                         hostname: state.config.hostname.clone(),
                         cwd,
                         entries,
                     })
                 }
-                Err(e) => Some(ControlMessage::Error {
-                    message: e.to_string(),
-                }),
+                Err(e) => Some(ControlMessage::Error { message: e.to_string() }),
             }
         }
         ControlMessage::InfoRequest => Some(ControlMessage::InfoResponse {
@@ -263,23 +221,37 @@ async fn handle_incoming_request(
             use crate::protocol::messages::Direction;
             match direction {
                 Direction::Push => {
-                    // Server wants to push files to us - accept and prepare to receive
-                    tracing::info!("Accepting push transfer from server, preparing to receive {} files", entries.len());
-
-                    // Initialize transfer receiver
                     state.transfer_receiver.start_transfer(id, entries.clone()).await;
-
                     Some(ControlMessage::TransferAccepted {
                         id,
                         resume_offsets: std::collections::HashMap::new(),
                     })
                 }
                 Direction::Pull => {
-                    // Server wants to pull files from us - we need to send them
-                    tracing::info!("Pull not yet implemented");
-                    Some(ControlMessage::TransferError {
+                    tracing::info!("Accepting pull transfer from server, will send {} entries", entries.len());
+
+                    let frame_tx = {
+                        let remote = state.remote.read().await;
+                        remote.as_ref().map(|r| r.frame_tx.clone())
+                    };
+
+                    let Some(frame_tx) = frame_tx else {
+                        return Some(ControlMessage::TransferError {
+                            id,
+                            error: "No remote connection to send pull data".to_string(),
+                        });
+                    };
+
+                    let root_dir = state.config.root_dir.clone();
+                    tokio::spawn(async move {
+                        crate::server::browser_transfer::send_entries(
+                            &root_dir, id, &entries, &frame_tx,
+                        ).await;
+                    });
+
+                    Some(ControlMessage::TransferAccepted {
                         id,
-                        error: "Pull transfer not yet implemented".to_string(),
+                        resume_offsets: std::collections::HashMap::new(),
                     })
                 }
             }
@@ -294,10 +266,8 @@ pub async fn perform_client_handshake(
     ws_read: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
     password: &Option<String>,
 ) -> anyhow::Result<CryptoStream> {
-    // Generate client keypair
     let client_keypair = KeyPair::generate();
 
-    // Receive server public key first (server sends first)
     let server_public = match ws_read.next().await {
         Some(Ok(Message::Text(text))) => {
             if let Ok(ControlMessage::KeyExchange { public_key }) = serde_json::from_str(&text) {
@@ -309,22 +279,18 @@ pub async fn perform_client_handshake(
         _ => anyhow::bail!("Failed to receive server public key"),
     };
 
-    // Send client public key
     let msg = ControlMessage::KeyExchange {
         public_key: client_keypair.public_key_base64(),
     };
     let json = serde_json::to_string(&msg)?;
     ws_write.send(Message::Text(json.into())).await?;
 
-    // Derive shared secret
     let shared_secret = derive_shared_secret(client_keypair.secret, &server_public);
 
-    // TODO: Implement password authentication if provided
     if password.is_some() {
         tracing::warn!("Password authentication not yet implemented");
     }
 
-    // Wait for handshake complete
     match ws_read.next().await {
         Some(Ok(Message::Text(text))) => {
             if !matches!(serde_json::from_str::<ControlMessage>(&text)?, ControlMessage::HandshakeComplete) {
@@ -334,6 +300,5 @@ pub async fn perform_client_handshake(
         _ => anyhow::bail!("Failed to receive HandshakeComplete"),
     }
 
-    // Create crypto stream (client = false)
     Ok(CryptoStream::from_shared_secret(&shared_secret, false))
 }

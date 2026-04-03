@@ -26,7 +26,8 @@
 - Large file support with chunked streaming and progress indication
 - Recursive directory transfer (auto-compressed via tar.gz)
 - Direct CLI file send mode (`--file`) — no web UI needed
-- Bidirectional — both sides can browse and send to each other
+- Bidirectional — push files to remote **or** pull files from remote
+- Both directions work from the browser UI (left pane = local, right pane = remote)
 - Zero configuration — just run it
 
 ## Install

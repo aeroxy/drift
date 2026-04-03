@@ -1,5 +1,4 @@
 use std::path::Path;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -7,7 +6,10 @@ use uuid::Uuid;
 use crate::crypto::stream::CryptoStream;
 use crate::fileops::compress;
 use crate::fileops::reader::ChunkedReader;
-use crate::protocol::codec::encode_data_frame;
+use crate::protocol::codec::{
+    encode_data_frame, encode_control_frame, decode_frame_type,
+    FRAME_TYPE_CONTROL,
+};
 use crate::protocol::messages::{ControlMessage, Direction, TransferEntry};
 
 use super::perform_client_handshake;
@@ -19,7 +21,6 @@ pub async fn send_file(
     file_path: &Path,
     password: &Option<String>,
 ) -> anyhow::Result<()> {
-    // Resolve file path
     let file_path = file_path.canonicalize()?;
     let file_name = file_path
         .file_name()
@@ -32,7 +33,6 @@ pub async fn send_file(
 
     tracing::info!("Preparing to send: {}", file_path.display());
 
-    // If directory, compress first
     let (actual_path, actual_size, cleanup_path) = if is_dir {
         let parent = file_path.parent().unwrap_or(Path::new("."));
         let (archive_path, archive_size) = compress::compress_directory(parent, &file_name)?;
@@ -42,7 +42,6 @@ pub async fn send_file(
         (file_path.clone(), metadata.len(), None)
     };
 
-    // Connect to remote
     let url = format!("ws://{}/ws", target);
     tracing::info!("Connecting to {}", url);
 
@@ -51,11 +50,9 @@ pub async fn send_file(
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    // Handshake
     let crypto = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
     tracing::info!("Encrypted connection established");
 
-    // Build transfer request
     let transfer_id = Uuid::new_v4();
     let entry = TransferEntry {
         relative_path: file_name.clone(),
@@ -74,32 +71,24 @@ pub async fn send_file(
         direction: Direction::Push,
     };
 
-    // Send request
-    send_encrypted_msg(&crypto, &mut ws_write, &request).await?;
+    send_encrypted_control(&crypto, &mut ws_write, &request).await?;
     tracing::info!("Transfer request sent, waiting for acceptance...");
 
-    // Wait for TransferAccepted
     loop {
-        let msg = recv_encrypted_msg(&crypto, &mut ws_read).await?;
+        let msg = recv_encrypted_control(&crypto, &mut ws_read).await?;
         match msg {
             ControlMessage::TransferAccepted { id, .. } if id == transfer_id => {
                 tracing::info!("Transfer accepted");
                 break;
             }
             ControlMessage::TransferError { error, .. } => {
-                if let Some(ref p) = cleanup_path {
-                    compress::cleanup_archive(p);
-                }
+                if let Some(ref p) = cleanup_path { compress::cleanup_archive(p); }
                 anyhow::bail!("Transfer rejected: {}", error);
             }
-            _ => {
-                // Ignore other messages (InfoRequest, etc) during handshake
-                continue;
-            }
+            _ => continue,
         }
     }
 
-    // Send file data
     let mut reader = ChunkedReader::open(&actual_path, 0).await?;
     let total = reader.total_size();
     let mut sent: u64 = 0;
@@ -107,16 +96,13 @@ pub async fn send_file(
 
     tracing::info!("Sending {} ({} bytes)...", file_name, total);
 
-    while let Some((offset, chunk)) = reader.read_chunk().await? {
-        let frame = encode_data_frame(transfer_id, offset, &chunk);
-
-        // Encrypt and send binary frame
+    while let Some((_offset, chunk)) = reader.read_chunk().await? {
+        let frame = encode_data_frame(transfer_id, sent, &chunk);
         let ciphertext = crypto.encrypt(&frame)?;
         ws_write.send(Message::Binary(ciphertext.into())).await?;
 
         sent += chunk.len() as u64;
 
-        // Print progress every 10%
         let percent = if total > 0 { sent * 100 / total } else { 100 };
         if percent / 10 > last_percent / 10 {
             tracing::info!("  {}% ({}/{})", percent, format_bytes(sent), format_bytes(total));
@@ -124,67 +110,57 @@ pub async fn send_file(
         }
     }
 
-    // Send TransferComplete
-    send_encrypted_msg(&crypto, &mut ws_write, &ControlMessage::TransferComplete {
+    send_encrypted_control(&crypto, &mut ws_write, &ControlMessage::TransferComplete {
         id: transfer_id,
     }).await?;
 
     tracing::info!("Transfer complete: {} sent to {}", file_name, target);
 
-    // Clean up temp archive
-    if let Some(ref p) = cleanup_path {
-        compress::cleanup_archive(p);
-    }
-
-    // Close connection
+    if let Some(ref p) = cleanup_path { compress::cleanup_archive(p); }
     let _ = ws_write.send(Message::Close(None)).await;
 
     Ok(())
 }
 
-async fn send_encrypted_msg(
+/// Encode and send a control message as an encrypted binary frame.
+async fn send_encrypted_control(
     crypto: &CryptoStream,
     ws_write: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
         Message,
     >,
     msg: &ControlMessage,
 ) -> anyhow::Result<()> {
     let json = serde_json::to_string(msg)?;
-    let ciphertext = crypto.encrypt(json.as_bytes())?;
-    let encoded = BASE64.encode(&ciphertext);
-    ws_write.send(Message::Text(encoded.into())).await?;
+    let frame = encode_control_frame(json.as_bytes());
+    let ciphertext = crypto.encrypt(&frame)?;
+    ws_write.send(Message::Binary(ciphertext.into())).await?;
     Ok(())
 }
 
-async fn recv_encrypted_msg(
+/// Receive one encrypted binary frame and parse it as a control message.
+async fn recv_encrypted_control(
     crypto: &CryptoStream,
     ws_read: &mut futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     >,
 ) -> anyhow::Result<ControlMessage> {
     loop {
         match ws_read.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let ciphertext = BASE64.decode(text.as_bytes())?;
-                let plaintext = crypto.decrypt(&ciphertext)?;
-                let msg: ControlMessage = serde_json::from_str(std::str::from_utf8(&plaintext)?)?;
+            Some(Ok(Message::Binary(encrypted))) => {
+                let plaintext = crypto.decrypt(&encrypted)?;
+                let (frame_type, payload) = decode_frame_type(&plaintext)?;
+                if frame_type != FRAME_TYPE_CONTROL {
+                    tracing::warn!("Expected control frame, got type {:#x} — skipping", frame_type);
+                    continue;
+                }
+                let msg: ControlMessage = serde_json::from_slice(payload)?;
                 return Ok(msg);
             }
-            Some(Ok(Message::Close(_))) => {
-                anyhow::bail!("Connection closed by remote");
-            }
-            Some(Err(e)) => {
-                anyhow::bail!("WebSocket error: {}", e);
-            }
-            None => {
-                anyhow::bail!("Connection closed");
-            }
-            _ => continue, // Skip binary/ping/pong
+            Some(Ok(Message::Close(_))) => anyhow::bail!("Connection closed by remote"),
+            Some(Err(e)) => anyhow::bail!("WebSocket error: {}", e),
+            None => anyhow::bail!("Connection closed"),
+            _ => continue,
         }
     }
 }

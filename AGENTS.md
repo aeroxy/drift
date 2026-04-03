@@ -16,11 +16,11 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
 
 - `src/server/` — axum router, WS handler, REST API, transfer orchestration
   - `ws_handler.rs` — WebSocket connection handler (browser + server-to-server)
-  - `browser_transfer.rs` — Transfer orchestration for browser-initiated transfers
-  - `transfer_receiver.rs` — Incoming file writer + tar.gz decompression
+  - `browser_transfer.rs` — Transfer orchestration for browser-initiated transfers; `send_entries()` is shared by push and pull
+  - `transfer_receiver.rs` — Incoming file writer + tar.gz decompression; `start_transfer_with_notify()` for pull completion signaling
   - `file_api.rs` — REST endpoints (/api/browse, /api/info)
 - `src/client/` — outbound WS connection to `--target`
-  - `mod.rs` — Bidirectional encrypted WS connection
+  - `mod.rs` — Bidirectional encrypted WS connection; handles incoming Push and Pull requests from server
   - `send.rs` — Direct `--file` send mode (connect, transfer, exit)
 - `src/protocol/` — message types (`ControlMessage` enum), binary codec
 - `src/crypto/` — X25519 key exchange, ChaCha20-Poly1305 stream cipher
@@ -31,6 +31,7 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
 - `src/frontend.rs` — `rust-embed` static asset serving with SPA fallback
 - `frontend/` — React app (Vite + TypeScript + Tailwind v4)
 - `frontend/test/` — integration tests (vitest); see README.md for test-resources setup
+- `wiki/` — feature documentation (see [Wiki](#wiki) section below)
 
 ## Build & Run
 
@@ -59,7 +60,18 @@ cd frontend && bun dev
 - Path safety: all user-supplied paths canonicalized and checked against root dir before any I/O
 - Folder transfers: compressed to tar.gz in `.drift/` temp dir, decompressed on receiver
 - `.drift/` directory is hidden from the web panel browse listing
-- When updating features, update README.md and this file (AGENTS.md / CLAUDE.md) to stay in sync
+- When updating features, update README.md, this file (AGENTS.md / CLAUDE.md), **and the relevant wiki doc(s)**
+
+## Wiki
+
+The `wiki/` directory contains canonical documentation for each feature. **Always read the relevant wiki doc before working on a feature, and update it whenever behavior changes.**
+
+| Doc | Covers |
+|-----|--------|
+| [wiki/push-transfer.md](wiki/push-transfer.md) | Push flow: browser → local server → remote server |
+| [wiki/pull-transfer.md](wiki/pull-transfer.md) | Pull flow: browser requests files from remote |
+| [wiki/protocol.md](wiki/protocol.md) | `ControlMessage` enum, binary frame format, connection types |
+| [wiki/encryption.md](wiki/encryption.md) | X25519 handshake, HKDF key derivation, ChaCha20-Poly1305 nonces |
 
 ## Dependencies
 
