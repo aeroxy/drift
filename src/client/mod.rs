@@ -1,6 +1,5 @@
 pub mod reconnect;
 pub mod send;
-pub mod transfer;
 
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -64,6 +63,23 @@ pub async fn connect_to_remote(
     let write_task = tokio::spawn(async move {
         loop {
             tokio::select! {
+                // biased: binary data always takes priority over control messages
+                // so that TransferComplete is never sent before pending binary chunks.
+                biased;
+                Some(binary_data) = binary_rx.recv() => {
+                    // Send binary data (encrypted binary frame)
+                    match crypto_write.encrypt(&binary_data) {
+                        Ok(ciphertext) => {
+                            if ws_write.send(Message::Binary(ciphertext.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Binary encryption failed: {}", e);
+                            break;
+                        }
+                    }
+                }
                 Some(msg) = outgoing_rx.recv() => {
                     // Send control message (encrypted text frame)
                     let json = serde_json::to_string(&msg).unwrap();
@@ -76,20 +92,6 @@ pub async fn connect_to_remote(
                         }
                         Err(e) => {
                             tracing::error!("Encryption failed: {}", e);
-                            break;
-                        }
-                    }
-                }
-                Some(binary_data) = binary_rx.recv() => {
-                    // Send binary data (encrypted binary frame)
-                    match crypto_write.encrypt(&binary_data) {
-                        Ok(ciphertext) => {
-                            if ws_write.send(Message::Binary(ciphertext.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Binary encryption failed: {}", e);
                             break;
                         }
                     }

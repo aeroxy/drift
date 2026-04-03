@@ -150,6 +150,36 @@ cargo build
 
 The `build.rs` script automatically builds the React frontend before compiling Rust. The built assets are embedded in the binary via `rust-embed`.
 
+### Testing
+
+Integration tests live in `frontend/test/`. They start real drift instances, transfer files via WebSocket, and verify MD5 checksums.
+
+**Set up test-resources** (not committed — create your own):
+
+```
+test-resources/
+├── host/           # Put at least one subdirectory with files here (tests folder transfer)
+│   └── some-dir/
+│       └── file.ext
+└── client/         # Put at least one file here (tests file transfer)
+    └── file.ext
+```
+
+Any files work — the tests discover entries dynamically. The host directory should contain at least one **subdirectory** to exercise the tar.gz folder transfer path.
+
+```bash
+# Run integration tests (builds cargo first)
+cd frontend && bun run test
+```
+
+The test suite:
+1. Backs up `test-resources/` → `test-resources-bak/`
+2. Starts two drift instances (host + client) on random ports
+3. Pushes host files to client and client files to host via WebSocket
+4. Verifies MD5 checksums of all transferred files
+5. Verifies `.drift/` temp directories are cleaned up
+6. Restores `test-resources/` from backup
+
 ### Project Structure
 
 ```

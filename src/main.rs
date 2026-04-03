@@ -53,7 +53,6 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("--port is required (or use --file --target for direct send)"))?;
 
     let config = AppConfig {
-        port,
         target: cli.target.clone(),
         password: cli.password.clone(),
         root_dir: std::env::current_dir()?,

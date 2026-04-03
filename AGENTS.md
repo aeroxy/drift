@@ -30,6 +30,7 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
   - `decompress.rs` — tar.gz → folder extraction after receive
 - `src/frontend.rs` — `rust-embed` static asset serving with SPA fallback
 - `frontend/` — React app (Vite + TypeScript + Tailwind v4)
+- `frontend/test/` — integration tests (vitest); see README.md for test-resources setup
 
 ## Build & Run
 

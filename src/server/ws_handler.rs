@@ -96,6 +96,22 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let write_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    // biased: binary data always takes priority over control messages
+                    // so that TransferComplete is never sent before pending binary chunks.
+                    biased;
+                    Some(binary_data) = binary_rx.recv() => {
+                        match crypto_write.encrypt(&binary_data) {
+                            Ok(ciphertext) => {
+                                if sender.send(Message::Binary(ciphertext.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Binary encryption failed: {}", e);
+                                break;
+                            }
+                        }
+                    }
                     Some(msg) = outgoing_rx.recv() => {
                         let json = serde_json::to_string(&msg).unwrap();
                         match crypto_write.encrypt(json.as_bytes()) {
@@ -107,19 +123,6 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             }
                             Err(e) => {
                                 tracing::error!("Encryption failed: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    Some(binary_data) = binary_rx.recv() => {
-                        match crypto_write.encrypt(&binary_data) {
-                            Ok(ciphertext) => {
-                                if sender.send(Message::Binary(ciphertext.into())).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("Binary encryption failed: {}", e);
                                 break;
                             }
                         }
