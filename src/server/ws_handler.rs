@@ -119,6 +119,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 frame_tx: frame_tx.clone(),
             });
         }
+        let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: true });
 
         // Send InfoRequest to get client's hostname and root_dir
         let (info_tx, info_rx) = tokio::sync::oneshot::channel();
@@ -156,11 +157,19 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             FRAME_TYPE_DATA => {
                                 match decode_data_frame(payload) {
                                     Ok((transfer_id, offset, chunk)) => {
-                                        if let Err(e) = state_read.transfer_receiver
+                                        match state_read.transfer_receiver
                                             .receive_chunk(transfer_id, offset, chunk).await
                                         {
-                                            tracing::error!("Failed to write chunk: {}", e);
-                                            break;
+                                            Ok(true) => {
+                                                // Auto-finalized — send TransferFinalized back
+                                                let msg = ControlMessage::TransferFinalized { id: transfer_id };
+                                                let json = serde_json::to_string(&msg).unwrap();
+                                                let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                            }
+                                            Ok(false) => {}
+                                            Err(e) => {
+                                                tracing::error!("Failed to write chunk: {}", e);
+                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -177,10 +186,31 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                         continue;
                                     }
                                 };
-                                if let ControlMessage::TransferComplete { id } = control_msg {
-                                    tracing::info!("Received TransferComplete: {}", id);
-                                    if let Err(e) = state_read.transfer_receiver.finalize_transfer(id).await {
-                                        tracing::error!("Failed to finalize transfer: {}", e);
+
+                                if let ControlMessage::TransferComplete { id, total_bytes } = control_msg {
+                                    tracing::info!("Received TransferComplete: {} ({} bytes)", id, total_bytes);
+                                    match state_read.transfer_receiver.signal_completion(id, total_bytes).await {
+                                        Ok(true) => {
+                                            // Finalized — send TransferFinalized back
+                                            let msg = ControlMessage::TransferFinalized { id };
+                                            let json = serde_json::to_string(&msg).unwrap();
+                                            let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                        }
+                                        Ok(false) => {
+                                            // Waiting for remaining chunks; they will auto-finalize
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Failed to signal completion: {}", e);
+                                        }
+                                    }
+                                    continue;
+                                }
+
+                                if let ControlMessage::TransferFinalized { id } = control_msg {
+                                    tracing::info!("Received TransferFinalized: {}", id);
+                                    let mut pending = state_read.pending_completions.lock().await;
+                                    if let Some(tx) = pending.remove(&id) {
+                                        let _ = tx.send(());
                                     }
                                     continue;
                                 }
@@ -223,6 +253,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             let mut remote = state.remote.write().await;
             *remote = None;
         }
+        let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: false });
 
         tracing::info!("Server-to-server connection closed");
         return;
@@ -245,6 +276,18 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         handle_browser_message(state.clone(), control_msg, outgoing_tx.clone()).await;
     }
 
+    // Subscribe to broadcast events and forward to this browser
+    let mut event_rx = state.browser_events.subscribe();
+    let outgoing_for_events = outgoing_tx.clone();
+    let event_task = tokio::spawn(async move {
+        while let Ok(msg) = event_rx.recv().await {
+            let json = serde_json::to_string(&msg).unwrap();
+            if outgoing_for_events.send(Message::Text(json.into())).is_err() {
+                break;
+            }
+        }
+    });
+
     let state_clone = state.clone();
     let read_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
@@ -263,6 +306,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     tokio::select! {
         _ = write_task => {},
         _ = read_task => {},
+        _ = event_task => {},
     }
 
     tracing::info!("WebSocket connection closed");
@@ -323,11 +367,12 @@ async fn handle_server_to_server_request(
             root_dir: state.config.root_dir.to_string_lossy().to_string(),
         }),
         ControlMessage::TransferRequest { id, entries, direction } => {
-            tracing::info!("Server received TransferRequest: id={}, entries={}, direction={:?}", id, entries.len(), direction);
+            tracing::info!("Server received TransferRequest from client: id={}, entries={}, direction={:?}", id, entries.len(), direction);
 
             use crate::protocol::messages::Direction;
             match direction {
                 Direction::Push => {
+                    tracing::info!("Accepting push transfer, preparing to receive {} files", entries.len());
                     state.transfer_receiver.start_transfer(id, entries.clone()).await;
                     Some(ControlMessage::TransferAccepted {
                         id,
@@ -366,7 +411,9 @@ async fn handle_server_to_server_request(
     }
 }
 
-/// Handle requests from browser (forward to remote if available, otherwise local).
+/// Handle requests from browser (forward to remote if available, else local).
+/// BrowseRequest is NOT handled locally when there is no remote — it returns an error
+/// to prevent the remote panel from mirroring local files.
 async fn handle_control_message(
     state: &AppState,
     msg: ControlMessage,
@@ -386,6 +433,17 @@ async fn handle_control_message(
                     }),
                 }
             }
+            // tx.send failed: channel closed
+            return Some(ControlMessage::Error {
+                message: "Remote connection lost".to_string(),
+            });
+        }
+
+        // No remote — BrowseRequest must not fall through to local handling
+        if matches!(msg, ControlMessage::BrowseRequest { .. }) {
+            return Some(ControlMessage::Error {
+                message: "No remote connection".to_string(),
+            });
         }
     }
 

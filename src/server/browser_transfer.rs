@@ -53,7 +53,7 @@ pub async fn handle_browser_transfer(
     // is still draining through the shared frame channel.
     match tokio::time::timeout(std::time::Duration::from_secs(60), response_rx).await {
         Ok(Ok(ControlMessage::TransferAccepted { .. })) => {
-            tracing::info!("Remote accepted transfer");
+            tracing::info!("Remote accepted transfer, starting file send");
 
             let _ = ws_tx.send(Message::Text(
                 serde_json::to_string(&ControlMessage::TransferAccepted {
@@ -75,8 +75,10 @@ pub async fn handle_browser_transfer(
                         Ok(Ok(())) => {
                             tracing::info!("Pull transfer complete: {}", id);
                             let _ = ws_tx.send(Message::Text(
-                                serde_json::to_string(&ControlMessage::TransferComplete { id })
-                                    .unwrap().into()
+                                serde_json::to_string(&ControlMessage::TransferComplete {
+                                    id,
+                                    total_bytes: 0,
+                                }).unwrap().into()
                             ));
                         }
                         Ok(Err(_)) => send_error(&ws_tx, id, "Pull transfer channel closed unexpectedly"),
@@ -159,13 +161,14 @@ pub async fn send_entries(
         }
     }
 
-    send_control(frame_tx, &ControlMessage::TransferComplete { id });
+    send_control(frame_tx, &ControlMessage::TransferComplete { id, total_bytes: total_sent });
     tracing::info!("send_entries complete: {} ({} bytes)", id, total_sent);
 
     cleanup_archives(&files_to_send);
 }
 
 /// Push entries to remote — reads local files and streams through the unified frame channel.
+/// Waits for TransferFinalized acknowledgment from the remote before notifying the browser.
 async fn push_entries(
     state: &AppState,
     id: Uuid,
@@ -210,6 +213,11 @@ async fn push_entries(
     let total_size: u64 = files_to_send.iter().map(|(_, _, s, _)| s).sum();
     let mut total_sent: u64 = 0;
 
+    // Register completion waiter BEFORE sending any data, so TransferFinalized
+    // cannot arrive and be missed between sending TransferComplete and registering.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    state.pending_completions.lock().await.insert(id, done_tx);
+
     for (display_name, file_path, _file_size, _cleanup) in &files_to_send {
         match ChunkedReader::open(file_path, 0).await {
             Ok(mut reader) => {
@@ -218,6 +226,7 @@ async fn push_entries(
                 while let Ok(Some((_offset, chunk))) = reader.read_chunk().await {
                     let frame = encode_data_frame(id, total_sent, &chunk);
                     if frame_tx.send(frame).is_err() {
+                        state.pending_completions.lock().await.remove(&id);
                         send_error(ws_tx, id, "Connection to remote lost");
                         cleanup_archives(&files_to_send);
                         return;
@@ -235,6 +244,7 @@ async fn push_entries(
                 }
             }
             Err(e) => {
+                state.pending_completions.lock().await.remove(&id);
                 send_error(ws_tx, id, &format!("Failed to open {}: {}", display_name, e));
                 cleanup_archives(&files_to_send);
                 return;
@@ -242,12 +252,28 @@ async fn push_entries(
         }
     }
 
-    send_control(&frame_tx, &ControlMessage::TransferComplete { id });
+    // Tell the remote we're done sending (with byte count for verification)
+    send_control(&frame_tx, &ControlMessage::TransferComplete { id, total_bytes: total_sent });
 
-    let _ = ws_tx.send(Message::Text(
-        serde_json::to_string(&ControlMessage::TransferComplete { id }).unwrap().into()
-    ));
-    tracing::info!("Push complete: {} ({} bytes)", id, total_sent);
+    // Wait for the remote to confirm receipt before telling the browser
+    match tokio::time::timeout(std::time::Duration::from_secs(300), done_rx).await {
+        Ok(Ok(())) => {
+            tracing::info!("Push verified complete: {} ({} bytes)", id, total_sent);
+            let _ = ws_tx.send(Message::Text(
+                serde_json::to_string(&ControlMessage::TransferComplete {
+                    id,
+                    total_bytes: total_sent,
+                }).unwrap().into()
+            ));
+        }
+        Ok(Err(_)) => {
+            send_error(ws_tx, id, "Remote completion channel closed unexpectedly");
+        }
+        Err(_) => {
+            state.pending_completions.lock().await.remove(&id);
+            send_error(ws_tx, id, "Remote did not confirm transfer within 5 minutes");
+        }
+    }
 
     cleanup_archives(&files_to_send);
 }

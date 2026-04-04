@@ -20,9 +20,14 @@ Browser (Machine A)    Server A            Server B (remote)
        │  TransferProgress │                       │
        │◀──────────────────│                       │
        │                   │ TransferComplete ────▶│
+       │                   │  (with total_bytes)   │
+       │                   │   TransferFinalized   │
+       │                   │◀──────────────────────│
        │  TransferComplete │                       │
        │◀──────────────────│                       │
 ```
+
+Server A waits for `TransferFinalized` from Server B before forwarding `TransferComplete` to the browser. This guarantees the browser only shows success after all bytes are confirmed written on the remote.
 
 ## Code Path
 
@@ -36,8 +41,12 @@ Browser (Machine A)    Server A            Server B (remote)
    - Encodes binary frames: `[16B UUID][8B offset][chunk]` via `encode_data_frame()`
    - Sends encrypted binary frames to Server B via `binary_tx`
    - Sends `TransferProgress` updates to the browser
-6. After all data is sent, `push_entries()` sends `TransferComplete` to both Server B and the browser.
-7. **Server B**'s read loop receives `TransferComplete`, calls `transfer_receiver.finalize_transfer()`:
+6. After all data is sent, `push_entries()` sends `TransferComplete { total_bytes }` to Server B and waits for a `TransferFinalized` acknowledgment.
+7. **Server B**'s read loop receives `TransferComplete`, calls `transfer_receiver.signal_completion(id, total_bytes)`:
+   - If all bytes already received, finalizes immediately and sends `TransferFinalized` back
+   - Otherwise sets `expected_total`; the final chunk auto-triggers finalization and sends `TransferFinalized`
+8. Once `TransferFinalized` is received, `push_entries()` sends `TransferComplete` to the browser.
+9. **Server B**'s `finalize_transfer()`:
    - Renames `.part` file to the final name
    - If the transfer contained directories, decompresses the `.tar.gz` archive
 

@@ -83,7 +83,7 @@ pub async fn handle_transfer_request(
 
                     // Send complete
                     let _ = ws_tx.send(Message::Text(
-                        serde_json::to_string(&ControlMessage::TransferComplete { id }).unwrap().into()
+                        serde_json::to_string(&ControlMessage::TransferComplete { id, total_bytes: 0 }).unwrap().into()
                     ));
                     tracing::info!("Transfer complete: {}", id);
                 }

@@ -13,6 +13,8 @@ pub struct ActiveTransfer {
     pub current_writer: Option<ChunkedWriter>,
     pub bytes_written: u64,
     pub has_dirs: bool,
+    /// Set when TransferComplete arrives, triggering auto-finalize in receive_chunk.
+    expected_total: Option<u64>,
     completion_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -39,6 +41,7 @@ impl TransferReceiver {
             current_writer: None,
             bytes_written: 0,
             has_dirs,
+            expected_total: None,
             completion_tx: None,
         });
     }
@@ -56,20 +59,24 @@ impl TransferReceiver {
             current_writer: None,
             bytes_written: 0,
             has_dirs,
+            expected_total: None,
             completion_tx: Some(tx),
         });
 
         rx
     }
 
-    pub async fn receive_chunk(&self, id: Uuid, _offset: u64, data: &[u8]) -> Result<(), String> {
+    /// Write a chunk into the active transfer.
+    /// Returns Ok(true) if the transfer was auto-finalized (all expected bytes received),
+    /// Ok(false) if still in progress, or Err on write failure.
+    pub async fn receive_chunk(&self, id: Uuid, _offset: u64, data: &[u8]) -> Result<bool, String> {
         let mut active = self.active_transfers.lock().await;
 
         // Unknown transfer — silently drop the chunk. This can happen during Pull setup
         // when the remote starts sending binary frames before TransferAccepted is processed.
         let Some(transfer) = active.get_mut(&id) else {
             tracing::warn!("Dropping chunk for unknown transfer {}", id);
-            return Ok(());
+            return Ok(false);
         };
 
         // Initialize writer if needed
@@ -104,7 +111,46 @@ impl TransferReceiver {
                 id, data.len(), transfer.bytes_written);
         }
 
-        Ok(())
+        // Auto-finalize if we've received all expected bytes
+        if let Some(expected) = transfer.expected_total {
+            if transfer.bytes_written >= expected {
+                tracing::info!("Auto-finalizing transfer {} ({} bytes)", id, expected);
+                drop(active);
+                self.finalize_transfer(id).await?;
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Signal that the sender has finished sending `total_bytes` total.
+    /// If all bytes are already received, finalizes immediately and returns Ok(true).
+    /// Otherwise stores the expected total and returns Ok(false) — finalization will
+    /// happen automatically in receive_chunk when the last chunk arrives.
+    pub async fn signal_completion(&self, id: Uuid, total_bytes: u64) -> Result<bool, String> {
+        let mut active = self.active_transfers.lock().await;
+
+        let Some(transfer) = active.get_mut(&id) else {
+            tracing::warn!("signal_completion for unknown transfer {} — already finalized?", id);
+            return Ok(true);
+        };
+
+        transfer.expected_total = Some(total_bytes);
+
+        if transfer.bytes_written >= total_bytes {
+            // All bytes already received; finalize now.
+            tracing::info!("signal_completion: all bytes already received for {}, finalizing", id);
+            drop(active);
+            self.finalize_transfer(id).await?;
+            Ok(true)
+        } else {
+            tracing::info!(
+                "signal_completion: {}/{} bytes received for {}, waiting for remaining",
+                transfer.bytes_written, total_bytes, id
+            );
+            Ok(false)
+        }
     }
 
     pub async fn finalize_transfer(&self, id: Uuid) -> Result<(), String> {

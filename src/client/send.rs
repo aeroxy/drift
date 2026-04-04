@@ -112,6 +112,7 @@ pub async fn send_file(
 
     send_encrypted_control(&crypto, &mut ws_write, &ControlMessage::TransferComplete {
         id: transfer_id,
+        total_bytes: sent,
     }).await?;
 
     tracing::info!("Transfer complete: {} sent to {}", file_name, target);

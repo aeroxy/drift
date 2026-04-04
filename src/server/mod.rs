@@ -11,14 +11,21 @@ use axum::{
     Router,
     routing::get,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tower_http::cors::CorsLayer;
+use uuid::Uuid;
 
 pub struct AppState {
     pub config: AppConfig,
     pub remote: RwLock<Option<RemoteConnection>>,
     pub transfer_receiver: transfer_receiver::TransferReceiver,
+    /// Oneshot channels fired when a remote confirms TransferFinalized.
+    /// push_entries registers here before sending TransferComplete.
+    pub pending_completions: Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
+    /// Broadcast channel for pushing events (ConnectionStatus etc.) to all browsers.
+    pub browser_events: broadcast::Sender<ControlMessage>,
 }
 
 pub type ResponseChannel = oneshot::Sender<ControlMessage>;
@@ -43,10 +50,13 @@ pub struct RemoteConnection {
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
         let transfer_receiver = transfer_receiver::TransferReceiver::new(config.root_dir.clone());
+        let (browser_events, _) = broadcast::channel(16);
         Self {
             config,
             remote: RwLock::new(None),
             transfer_receiver,
+            pending_completions: Mutex::new(HashMap::new()),
+            browser_events,
         }
     }
 }

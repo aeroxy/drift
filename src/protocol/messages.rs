@@ -44,6 +44,10 @@ pub enum ControlMessage {
     },
     TransferComplete {
         id: Uuid,
+        total_bytes: u64,
+    },
+    TransferFinalized {
+        id: Uuid,
     },
     TransferError {
         id: Uuid,
@@ -51,6 +55,9 @@ pub enum ControlMessage {
     },
 
     // System
+    ConnectionStatus {
+        has_remote: bool,
+    },
     Ping,
     Pong,
     Error { message: String },

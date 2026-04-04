@@ -94,11 +94,19 @@ pub async fn connect_to_remote(
                         FRAME_TYPE_DATA => {
                             match decode_data_frame(payload) {
                                 Ok((transfer_id, offset, chunk)) => {
-                                    if let Err(e) = state_read.transfer_receiver
+                                    match state_read.transfer_receiver
                                         .receive_chunk(transfer_id, offset, chunk).await
                                     {
-                                        tracing::error!("Failed to write chunk: {}", e);
-                                        break;
+                                        Ok(true) => {
+                                            // Auto-finalized — send TransferFinalized back
+                                            let msg = ControlMessage::TransferFinalized { id: transfer_id };
+                                            let json = serde_json::to_string(&msg).unwrap();
+                                            let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => {
+                                            tracing::error!("Failed to write chunk: {}", e);
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -116,10 +124,30 @@ pub async fn connect_to_remote(
                                 }
                             };
 
-                            if let ControlMessage::TransferComplete { id } = control_msg {
-                                tracing::info!("Received TransferComplete from server: {}", id);
-                                if let Err(e) = state_read.transfer_receiver.finalize_transfer(id).await {
-                                    tracing::error!("Failed to finalize transfer: {}", e);
+                            if let ControlMessage::TransferComplete { id, total_bytes } = control_msg {
+                                tracing::info!("Received TransferComplete from server: {} ({} bytes)", id, total_bytes);
+                                match state_read.transfer_receiver.signal_completion(id, total_bytes).await {
+                                    Ok(true) => {
+                                        // Finalized — send TransferFinalized back
+                                        let msg = ControlMessage::TransferFinalized { id };
+                                        let json = serde_json::to_string(&msg).unwrap();
+                                        let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                    }
+                                    Ok(false) => {
+                                        // Waiting for remaining chunks; they will auto-finalize
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to signal completion: {}", e);
+                                    }
+                                }
+                                continue;
+                            }
+
+                            if let ControlMessage::TransferFinalized { id } = control_msg {
+                                tracing::info!("Received TransferFinalized: {}", id);
+                                let mut pending = state_read.pending_completions.lock().await;
+                                if let Some(tx) = pending.remove(&id) {
+                                    let _ = tx.send(());
                                 }
                                 continue;
                             }
@@ -162,6 +190,7 @@ pub async fn connect_to_remote(
             frame_tx: frame_tx.clone(),
         });
     }
+    let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: true });
 
     // Send InfoRequest to get remote hostname and root_dir
     let (info_tx, info_rx) = tokio::sync::oneshot::channel();
@@ -186,6 +215,7 @@ pub async fn connect_to_remote(
         let mut remote = state.remote.write().await;
         *remote = None;
     }
+    let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: false });
 
     Ok(())
 }

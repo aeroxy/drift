@@ -39,8 +39,10 @@ export type ControlMessage =
   | { type: "InfoResponse"; hostname: string; root_dir: string }
   | { type: "TransferRequest"; id: string; entries: TransferEntry[]; direction: "Push" | "Pull" }
   | { type: "TransferProgress"; id: string; path: string; bytes_done: number; bytes_total: number }
-  | { type: "TransferComplete"; id: string }
+  | { type: "TransferComplete"; id: string; total_bytes: number }
+  | { type: "TransferFinalized"; id: string }
   | { type: "TransferError"; id: string; error: string }
+  | { type: "ConnectionStatus"; has_remote: boolean }
   | { type: "Ping" }
   | { type: "Pong" }
   | { type: "Error"; message: string };

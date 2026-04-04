@@ -17,8 +17,10 @@ Control messages are JSON, serialized with `serde` using `#[serde(tag = "type")]
 | `TransferRequest` | `id: Uuid`, `entries: Vec<TransferEntry>`, `direction: Direction` | initiator→remote | Start a transfer |
 | `TransferAccepted` | `id: Uuid`, `resume_offsets: HashMap<String, u64>` | remote→initiator | Accept and ready |
 | `TransferProgress` | `id`, `path`, `bytes_done`, `bytes_total` | sender→browser | Progress update |
-| `TransferComplete` | `id: Uuid` | sender→receiver | All data sent |
+| `TransferComplete` | `id: Uuid`, `total_bytes: u64` | sender→receiver | All data sent; receiver verifies byte count |
+| `TransferFinalized` | `id: Uuid` | receiver→sender | Receiver has written and finalized all data |
 | `TransferError` | `id: Uuid`, `error: String` | either | Failure |
+| `ConnectionStatus` | `has_remote: bool` | server→browser | Pushed to browsers when remote connects/disconnects |
 | `Ping` / `Pong` | — | bidirectional | Keep-alive |
 | `Error` | `message: String` | either | Generic error |
 

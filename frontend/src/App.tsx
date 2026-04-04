@@ -46,15 +46,26 @@ export default function App() {
     }
   }, []);
 
-  // Fetch info
-  useEffect(() => {
-    fetch("/api/info")
-      .then((r) => r.json())
-      .then((info: InfoResponse) => {
-        setHasRemote(info.has_remote);
-      })
-      .catch(() => {});
+  // Fetch remote status and clear stale remote state when disconnected
+  const fetchRemoteStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/api/info");
+      const info: InfoResponse = await r.json();
+      setHasRemote(info.has_remote);
+      if (!info.has_remote) {
+        setRemoteEntries([]);
+        setRemoteInfo({ hostname: "...", cwd: "..." });
+        setRemoteSelected(new Set());
+      }
+    } catch {
+      // ignore
+    }
   }, []);
+
+  // Initial remote status fetch on mount
+  useEffect(() => {
+    fetchRemoteStatus();
+  }, [fetchRemoteStatus]);
 
   // Initial local load
   useEffect(() => {
@@ -68,9 +79,13 @@ export default function App() {
         setRemoteEntries(msg.entries);
         setRemoteSelected(new Set());
         break;
-      case "InfoResponse":
-        setRemoteInfo({ hostname: msg.hostname, cwd: msg.root_dir });
-        setHasRemote(true);
+      case "ConnectionStatus":
+        setHasRemote(msg.has_remote);
+        if (!msg.has_remote) {
+          setRemoteEntries([]);
+          setRemoteInfo({ hostname: "...", cwd: "..." });
+          setRemoteSelected(new Set());
+        }
         break;
       case "TransferProgress":
         updateProgress(msg);
@@ -93,19 +108,19 @@ export default function App() {
     }
   });
 
+  // On WS reconnect, re-check remote status (may have changed while browser WS was down)
+  useEffect(() => {
+    if (connected) {
+      fetchRemoteStatus();
+    }
+  }, [connected, fetchRemoteStatus]);
+
   // Refresh remote file listing
   const refreshRemote = useCallback(() => {
     if (connected && hasRemote) {
       send({ type: "BrowseRequest", path: "." });
     }
   }, [connected, hasRemote, send]);
-
-  // Request remote info on connect
-  useEffect(() => {
-    if (connected) {
-      send({ type: "InfoRequest" });
-    }
-  }, [connected, send]);
 
   // Request remote browse when we have a remote
   useEffect(() => {
