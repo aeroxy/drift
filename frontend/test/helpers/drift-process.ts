@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, execFileSync, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -38,7 +38,7 @@ export class DriftProcess {
         return;
       }
 
-      const args = ['--port', String(this.port)];
+      const args = ['serve', '--port', String(this.port)];
       if (this.target) {
         args.push('--target', this.target);
       }
@@ -98,4 +98,17 @@ export class DriftProcess {
       this.proc.kill('SIGTERM');
     });
   }
+}
+
+/** Run a one-shot drift CLI command and return stdout. Throws on non-zero exit. */
+export function runDriftCli(args: string[], opts?: { cwd?: string; timeoutMs?: number }): string {
+  if (!fs.existsSync(BINARY)) {
+    throw new Error(`drift binary not found at ${BINARY}. Run \`cargo build\` first.`);
+  }
+  return execFileSync(BINARY, args, {
+    cwd: opts?.cwd ?? PROJECT_ROOT,
+    timeout: opts?.timeoutMs ?? 30_000,
+    env: { ...process.env, RUST_LOG: 'drift=info' },
+    encoding: 'utf-8',
+  });
 }

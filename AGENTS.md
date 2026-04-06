@@ -4,7 +4,7 @@ Encrypted file transfer over WebSocket with an embedded React UI.
 
 ## Project Overview
 
-drift is a single Rust binary that enables bidirectional, encrypted file/folder transfer between two machines. It embeds a React frontend served at the configured port, providing a two-pane file browser. It also supports a direct `--file` send mode that transfers without starting a web server.
+drift is a single Rust binary that enables bidirectional, encrypted file/folder transfer between two machines. It embeds a React frontend served at the configured port, providing a two-pane file browser. It also supports CLI commands (`send`, `ls`, `pull`) for headless operation without the web UI.
 
 ## Architecture
 
@@ -20,8 +20,10 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
   - `transfer_receiver.rs` — Incoming file writer + tar.gz decompression; `start_transfer_with_notify()` for pull completion signaling
   - `file_api.rs` — REST endpoints (/api/browse, /api/info)
 - `src/client/` — outbound WS connection to `--target`
-  - `mod.rs` — Bidirectional encrypted WS connection; handles incoming Push and Pull requests from server
-  - `send.rs` — Direct `--file` send mode (connect, transfer, exit)
+  - `mod.rs` — Bidirectional encrypted WS connection; shared types (`WsWrite`, `WsRead`, `DecryptedFrame`) and `recv_encrypted_frame()`
+  - `send.rs` — Direct file send mode (connect, transfer, exit); shared helpers `send_encrypted_control()`, `recv_encrypted_control()`, `format_bytes()`
+  - `browse.rs` — Remote file listing (`ls` command)
+  - `pull.rs` — Remote file pull (`pull` command)
 - `src/protocol/` — message types (`ControlMessage` enum), binary codec
 - `src/crypto/` — X25519 key exchange, ChaCha20-Poly1305 stream cipher
 - `src/fileops/` — directory listing, chunked async reader/writer, tar.gz compress/decompress
@@ -40,10 +42,20 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
 cargo build
 
 # Run server
-cargo run -- --port 8000
-cargo run -- --port 8000 --target 192.168.0.2:8000 --password secret
+cargo run -- serve --port 8000
+cargo run -- serve --port 8000 --target 192.168.0.2:8000 --password secret
 
-# Direct file send (no web UI)
+# List files on a remote host
+cargo run -- ls --target 192.168.0.2:8000 [path]
+
+# Pull a file or folder from a remote host
+cargo run -- pull --target 192.168.0.2:8000 <remote-path> [--output dir]
+
+# Send a file directly (no web UI)
+cargo run -- send --target 192.168.0.2:8000 test.mp4
+
+# Legacy flat args still work:
+cargo run -- --port 8000
 cargo run -- --target 192.168.0.2:8000 --file test.mp4
 
 # Frontend dev (hot reload, proxies API/WS to Rust backend)
@@ -72,6 +84,11 @@ The `wiki/` directory contains canonical documentation for each feature. **Alway
 | [wiki/pull-transfer.md](wiki/pull-transfer.md) | Pull flow: browser requests files from remote |
 | [wiki/protocol.md](wiki/protocol.md) | `ControlMessage` enum, binary frame format, connection types |
 | [wiki/encryption.md](wiki/encryption.md) | X25519 handshake, HKDF key derivation, ChaCha20-Poly1305 nonces |
+| [wiki/cli.md](wiki/cli.md) | CLI subcommands: serve, send, ls, pull |
+
+## Requirements
+
+- Every new feature or CLI command must ship with a corresponding integration test in `frontend/test/integration.test.ts`. If the feature is a one-shot CLI command (like `ls` or `pull`), use `runDriftCli()` from `drift-process.ts` to exercise it against a live server and assert on output or file integrity.
 
 ## Dependencies
 

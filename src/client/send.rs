@@ -124,12 +124,9 @@ pub async fn send_file(
 }
 
 /// Encode and send a control message as an encrypted binary frame.
-async fn send_encrypted_control(
+pub(crate) async fn send_encrypted_control(
     crypto: &CryptoStream,
-    ws_write: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-        Message,
-    >,
+    ws_write: &mut super::WsWrite,
     msg: &ControlMessage,
 ) -> anyhow::Result<()> {
     let json = serde_json::to_string(msg)?;
@@ -140,11 +137,9 @@ async fn send_encrypted_control(
 }
 
 /// Receive one encrypted binary frame and parse it as a control message.
-async fn recv_encrypted_control(
+pub(crate) async fn recv_encrypted_control(
     crypto: &CryptoStream,
-    ws_read: &mut futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    >,
+    ws_read: &mut super::WsRead,
 ) -> anyhow::Result<ControlMessage> {
     loop {
         match ws_read.next().await {
@@ -166,7 +161,7 @@ async fn recv_encrypted_control(
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1}GB", bytes as f64 / 1_073_741_824.0)
     } else if bytes >= 1_048_576 {

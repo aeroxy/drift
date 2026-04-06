@@ -1,3 +1,5 @@
+pub mod browse;
+pub mod pull;
 pub mod reconnect;
 pub mod send;
 
@@ -14,6 +16,58 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
+
+/// Type alias for the WebSocket write half.
+pub(crate) type WsWrite = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
+
+/// Type alias for the WebSocket read half.
+pub(crate) type WsRead = futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
+
+/// A decrypted frame from the WebSocket — either a data chunk or a control message.
+#[allow(dead_code)]
+pub(crate) enum DecryptedFrame {
+    Control(ControlMessage),
+    Data { transfer_id: Uuid, offset: u64, chunk: Vec<u8> },
+}
+
+/// Receive and decrypt the next binary WebSocket frame, returning either a data or control frame.
+pub(crate) async fn recv_encrypted_frame(
+    crypto: &CryptoStream,
+    ws_read: &mut WsRead,
+) -> anyhow::Result<DecryptedFrame> {
+    loop {
+        match ws_read.next().await {
+            Some(Ok(Message::Binary(encrypted))) => {
+                let plaintext = crypto.decrypt(&encrypted)?;
+                let (frame_type, payload) = decode_frame_type(&plaintext)?;
+                match frame_type {
+                    FRAME_TYPE_DATA => {
+                        let (id, offset, chunk) = decode_data_frame(payload)?;
+                        return Ok(DecryptedFrame::Data {
+                            transfer_id: id,
+                            offset,
+                            chunk: chunk.to_vec(),
+                        });
+                    }
+                    FRAME_TYPE_CONTROL => {
+                        let msg: ControlMessage = serde_json::from_slice(payload)?;
+                        return Ok(DecryptedFrame::Control(msg));
+                    }
+                    _ => continue,
+                }
+            }
+            Some(Ok(Message::Close(_))) => anyhow::bail!("Connection closed by remote"),
+            Some(Err(e)) => anyhow::bail!("WebSocket error: {}", e),
+            None => anyhow::bail!("Connection closed"),
+            _ => continue,
+        }
+    }
+}
 
 pub async fn connect_to_remote(
     target: &str,

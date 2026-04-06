@@ -26,6 +26,7 @@
 - Large file support with chunked streaming and progress indication
 - Recursive directory transfer (auto-compressed via tar.gz)
 - Direct CLI file send mode (`--file`) — no web UI needed
+- CLI commands to explore remote hosts (`ls`, `pull`) — no web UI needed
 - Bidirectional — push files to remote **or** pull files from remote
 - Both directions work from the browser UI (left pane = local, right pane = remote)
 - Zero configuration — just run it
@@ -49,7 +50,7 @@ cargo build --release
 
 ```bash
 # Serve on port 8000, browsing the current directory
-drift --port 8000
+drift serve --port 8000
 ```
 
 Visit `http://localhost:8000` to see the file browser.
@@ -58,25 +59,48 @@ Visit `http://localhost:8000` to see the file browser.
 
 ```bash
 # Machine A (server)
-drift --port 8000
+drift serve --port 8000
 
 # Machine B (connects to A)
-drift --port 9000 --target 192.168.0.2:8000
+drift serve --port 9000 --target 192.168.0.2:8000
 ```
 
 Both machines now show a two-pane UI. Select files on either side and copy them across. Both `localhost:8000` and `localhost:9000` show each other's files.
+
+### List files on a remote host
+
+```bash
+# List files at the root of a running drift server
+drift ls --target 192.168.0.2:8000
+
+# List a subdirectory
+drift ls --target 192.168.0.2:8000 src
+```
+
+### Pull files from a remote host
+
+```bash
+# Pull a file
+drift pull --target 192.168.0.2:8000 report.pdf
+
+# Pull a directory (automatically decompressed)
+drift pull --target 192.168.0.2:8000 my-project
+
+# Pull to a specific output directory
+drift pull --target 192.168.0.2:8000 data.csv --output /tmp/downloads
+```
 
 ### Send a file directly (no web UI)
 
 ```bash
 # Send a file to a running drift server
-drift --target 192.168.0.2:8000 --file video.mp4
+drift send --target 192.168.0.2:8000 video.mp4
 
 # Send a folder (automatically compressed)
-drift --target 192.168.0.2:8000 --file ./my-project
+drift send --target 192.168.0.2:8000 ./my-project
 
 # With password
-drift --target 192.168.0.2:8000 --file data.zip --password secret
+drift send --target 192.168.0.2:8000 data.zip --password secret
 ```
 
 This connects, transfers the file, prints progress, and exits. No web server is started.
@@ -85,10 +109,10 @@ This connects, transfers the file, prints progress, and exits. No web server is 
 
 ```bash
 # Machine A
-drift --port 8000 --password mysecret
+drift serve --port 8000 --password mysecret
 
 # Machine B
-drift --port 9000 --target 192.168.0.2:8000 --password mysecret
+drift serve --port 9000 --target 192.168.0.2:8000 --password mysecret
 ```
 
 ## How It Works
@@ -118,23 +142,26 @@ drift --port 9000 --target 192.168.0.2:8000 --password mysecret
 ## CLI Reference
 
 ```
-drift [OPTIONS]
+drift <COMMAND> [OPTIONS]
 
-Options:
-    --port <PORT>          Port to run the server on (not needed with --file)
-    --target <TARGET>      Remote target to connect to (e.g. 192.168.0.2:8000)
-    --password <PASSWORD>  Optional password for authentication
-    --file <FILE>          Send a file or folder directly without starting a web panel
-    -h, --help             Print help
+Commands:
+    serve   Start the drift server with web UI
+    send    Send a file or folder to a remote drift server
+    ls      List files on a remote drift server
+    pull    Pull a file or folder from a remote drift server
 ```
 
-### Modes
+### Commands
 
-| Mode | Command | Description |
+| Command | Example | Description |
 |---|---|---|
-| Server only | `drift --port 8000` | Starts web UI, waits for connections |
-| Server + Client | `drift --port 9000 --target host:8000` | Starts web UI and connects to remote |
-| Direct send | `drift --target host:8000 --file path` | Sends file/folder and exits |
+| `serve` | `drift serve --port 8000` | Starts web UI, waits for connections |
+| `serve` | `drift serve --port 9000 --target host:8000` | Starts web UI and connects to remote |
+| `send` | `drift send --target host:8000 video.mp4` | Sends file/folder and exits |
+| `ls` | `drift ls --target host:8000 [path]` | Lists files on remote |
+| `pull` | `drift pull --target host:8000 file.txt` | Pulls file/folder from remote |
+
+Legacy flat args (`drift --port 8000`, `drift --target host --file path`) are still supported for backward compatibility.
 
 ## Development
 
@@ -195,7 +222,9 @@ drift/
 │   │   └── transfer_receiver.rs # Incoming file writer + decompression
 │   ├── client/
 │   │   ├── mod.rs           # Outbound WS connection to --target
-│   │   └── send.rs          # Direct --file send mode
+│   │   ├── send.rs          # Direct file send mode
+│   │   ├── browse.rs        # Remote file listing (ls command)
+│   │   └── pull.rs          # Remote file pull (pull command)
 │   ├── protocol/
 │   │   ├── messages.rs      # ControlMessage enum, TransferEntry
 │   │   └── codec.rs         # Binary frame encoding/decoding

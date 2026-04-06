@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
 import { getAvailablePort } from './helpers/ports.js';
-import { DriftProcess } from './helpers/drift-process.js';
+import { DriftProcess, runDriftCli } from './helpers/drift-process.js';
 import { WsBrowserClient } from './helpers/ws-client.js';
 import { computeAllChecksums } from './helpers/checksums.js';
 import type { FileEntry } from '../src/types/protocol.js';
@@ -264,6 +264,88 @@ describe('drift integration', () => {
     );
     for (const [rel, md5] of clientChecksums) {
       expect(hostAfter.get(rel), `client file "${rel}" missing from host after transfer`).toBe(md5);
+    }
+  }, 120_000);
+
+  it('lists remote files via CLI ls', () => {
+    const target = `127.0.0.1:${host.port}`;
+    const output = runDriftCli(['ls', '--target', target]);
+
+    // Should contain the hostname header line and at least one entry name
+    for (const entry of hostEntries) {
+      expect(output, `ls output should contain "${entry.name}"`).toContain(entry.name);
+    }
+  }, 30_000);
+
+  it('lists remote subdirectory via CLI ls', () => {
+    // Find a directory entry on the host to browse into
+    const dirEntry = hostEntries.find((e) => e.is_dir);
+    if (!dirEntry) {
+      console.warn('Skipping subdirectory ls test — no directories in host test-resources');
+      return;
+    }
+
+    const target = `127.0.0.1:${host.port}`;
+    const output = runDriftCli(['ls', '--target', target, dirEntry.name]);
+
+    // Should contain the hostname:cwd header
+    expect(output).toContain(dirEntry.name);
+  }, 30_000);
+
+  it('pulls a file via CLI pull', async () => {
+    // Find a non-directory entry on the host
+    const fileEntry = hostEntries.find((e) => !e.is_dir);
+    if (!fileEntry) {
+      console.warn('Skipping CLI pull test — no files in host test-resources');
+      return;
+    }
+
+    const tmpDir = fs.mkdtempSync(path.join(PROJECT_ROOT, 'test-resources', '.pull-test-'));
+    try {
+      const target = `127.0.0.1:${host.port}`;
+      runDriftCli(['pull', '--target', target, fileEntry.name, '--output', tmpDir], {
+        timeoutMs: 60_000,
+      });
+
+      const pulledPath = path.join(tmpDir, fileEntry.name);
+      expect(fs.existsSync(pulledPath), `pulled file should exist at ${pulledPath}`).toBe(true);
+
+      // Verify checksum matches the original
+      const originalChecksums = await computeAllChecksums(path.join(TEST_RESOURCES, 'host'));
+      const pulledChecksums = await computeAllChecksums(tmpDir);
+      const originalMd5 = originalChecksums.get(fileEntry.name);
+      const pulledMd5 = pulledChecksums.get(fileEntry.name);
+      expect(pulledMd5, `pulled file MD5 should match original`).toBe(originalMd5);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('pulls a directory via CLI pull', async () => {
+    const dirEntry = hostEntries.find((e) => e.is_dir);
+    if (!dirEntry) {
+      console.warn('Skipping CLI pull directory test — no directories in host test-resources');
+      return;
+    }
+
+    const tmpDir = fs.mkdtempSync(path.join(PROJECT_ROOT, 'test-resources', '.pull-test-'));
+    try {
+      const target = `127.0.0.1:${host.port}`;
+      runDriftCli(['pull', '--target', target, dirEntry.name, '--output', tmpDir], {
+        timeoutMs: 120_000,
+      });
+
+      const pulledPath = path.join(tmpDir, dirEntry.name);
+      expect(fs.existsSync(pulledPath), `pulled directory should exist at ${pulledPath}`).toBe(true);
+
+      // Verify checksums of all files within the directory
+      const originalChecksums = await computeAllChecksums(path.join(TEST_RESOURCES, 'host', dirEntry.name));
+      const pulledChecksums = await computeAllChecksums(pulledPath);
+      for (const [rel, md5] of originalChecksums) {
+        expect(pulledChecksums.get(rel), `pulled file "${rel}" should match original`).toBe(md5);
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   }, 120_000);
 

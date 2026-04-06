@@ -1,4 +1,5 @@
 /test-resources
 /test-resources-bak
 /target
+/refs
 .DS_Store
