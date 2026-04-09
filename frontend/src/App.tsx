@@ -22,6 +22,7 @@ export default function App() {
     cwd: "...",
   });
   const [remoteEntries, setRemoteEntries] = useState<FileEntry[]>([]);
+  const [remotePath, setRemotePath] = useState(".");
   const [remoteSelected, setRemoteSelected] = useState<Set<string>>(new Set());
   const [hasRemote, setHasRemote] = useState(false);
 
@@ -55,6 +56,7 @@ export default function App() {
       if (!info.has_remote) {
         setRemoteEntries([]);
         setRemoteInfo({ hostname: "...", cwd: "..." });
+        setRemotePath(".");
         setRemoteSelected(new Set());
       }
     } catch {
@@ -84,6 +86,7 @@ export default function App() {
         if (!msg.has_remote) {
           setRemoteEntries([]);
           setRemoteInfo({ hostname: "...", cwd: "..." });
+          setRemotePath(".");
           setRemoteSelected(new Set());
         }
         break;
@@ -94,7 +97,7 @@ export default function App() {
         completeTransfer(msg.id);
         // Refresh both panes after transfer
         fetchLocal(localPath);
-        send({ type: "BrowseRequest", path: "." });
+        send({ type: "BrowseRequest", path: remotePath });
         break;
       case "TransferError":
         failTransfer(msg.id, msg.error);
@@ -118,13 +121,14 @@ export default function App() {
   // Refresh remote file listing
   const refreshRemote = useCallback(() => {
     if (connected && hasRemote) {
-      send({ type: "BrowseRequest", path: "." });
+      send({ type: "BrowseRequest", path: remotePath });
     }
-  }, [connected, hasRemote, send]);
+  }, [connected, hasRemote, remotePath, send]);
 
   // Request remote browse when we have a remote
   useEffect(() => {
     if (connected && hasRemote) {
+      setRemotePath(".");
       send({ type: "BrowseRequest", path: "." });
     }
   }, [connected, hasRemote, send]);
@@ -165,9 +169,16 @@ export default function App() {
 
   const handleRemoteNavigate = useCallback(
     (name: string) => {
-      send({ type: "BrowseRequest", path: name === ".." ? ".." : name });
+      let newPath: string;
+      if (name === "..") {
+        newPath = remotePath === "." ? "." : remotePath.split("/").slice(0, -1).join("/") || ".";
+      } else {
+        newPath = remotePath === "." ? name : `${remotePath}/${name}`;
+      }
+      setRemotePath(newPath);
+      send({ type: "BrowseRequest", path: newPath });
     },
-    [send],
+    [remotePath, send],
   );
 
   // Transfer actions
@@ -187,7 +198,7 @@ export default function App() {
       return;
     }
     const transferEntries: TransferEntry[] = selectedEntries.map((e) => ({
-      relative_path: e.name,
+      relative_path: localPath === "." ? e.name : `${localPath}/${e.name}`,
       size: e.size,
       is_dir: e.is_dir,
       permissions: e.permissions,
@@ -203,6 +214,7 @@ export default function App() {
       id: transferId,
       entries: transferEntries,
       direction: "Push",
+      destination_path: remotePath,
     } as const;
 
     console.log("Sending transfer request:", msg);
@@ -210,7 +222,7 @@ export default function App() {
 
     // Clear selection
     setLocalSelected(new Set());
-  }, [hasRemote, localSelected, localEntries, send, hasActiveTransfers, startTransfer]);
+  }, [hasRemote, localSelected, localEntries, localPath, remotePath, send, hasActiveTransfers, startTransfer]);
 
   const handleCopyToLocal = useCallback(() => {
     if (!hasRemote || remoteSelected.size === 0 || hasActiveTransfers) return;
@@ -227,7 +239,7 @@ export default function App() {
       return;
     }
     const transferEntries: TransferEntry[] = selectedEntries.map((e) => ({
-      relative_path: e.name,
+      relative_path: remotePath === "." ? e.name : `${remotePath}/${e.name}`,
       size: e.size,
       is_dir: e.is_dir,
       permissions: e.permissions,
@@ -243,11 +255,12 @@ export default function App() {
       id: transferId,
       entries: transferEntries,
       direction: "Pull",
+      destination_path: localPath,
     });
 
     // Clear selection
     setRemoteSelected(new Set());
-  }, [hasRemote, remoteSelected, remoteEntries, send, hasActiveTransfers, startTransfer]);
+  }, [hasRemote, remoteSelected, remoteEntries, remotePath, localPath, send, hasActiveTransfers, startTransfer]);
 
   const activeTransfers = [...transfers.values()];
 

@@ -69,10 +69,13 @@ pub async fn pull_remote(
         permissions: entry_info.permissions,
     };
 
+    let destination = output_dir.map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+
     send_encrypted_control(&crypto, &mut ws_write, &ControlMessage::TransferRequest {
         id: transfer_id,
         entries: vec![entry],
         direction: Direction::Pull,
+        destination_path: destination,
     }).await?;
 
     // Wait for acceptance

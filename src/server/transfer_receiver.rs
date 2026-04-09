@@ -13,6 +13,7 @@ pub struct ActiveTransfer {
     pub current_writer: Option<ChunkedWriter>,
     pub bytes_written: u64,
     pub has_dirs: bool,
+    pub destination_path: String,
     /// Set when TransferComplete arrives, triggering auto-finalize in receive_chunk.
     expected_total: Option<u64>,
     completion_tx: Option<oneshot::Sender<()>>,
@@ -31,8 +32,8 @@ impl TransferReceiver {
         }
     }
 
-    pub async fn start_transfer(&self, id: Uuid, entries: Vec<TransferEntry>) {
-        tracing::info!("Starting to receive transfer: {} ({} entries)", id, entries.len());
+    pub async fn start_transfer(&self, id: Uuid, entries: Vec<TransferEntry>, destination_path: String) {
+        tracing::info!("Starting to receive transfer: {} ({} entries) to {}", id, entries.len(), destination_path);
         let has_dirs = entries.iter().any(|e| e.is_dir);
 
         let mut active = self.active_transfers.lock().await;
@@ -41,6 +42,7 @@ impl TransferReceiver {
             current_writer: None,
             bytes_written: 0,
             has_dirs,
+            destination_path,
             expected_total: None,
             completion_tx: None,
         });
@@ -48,8 +50,8 @@ impl TransferReceiver {
 
     /// Like `start_transfer` but returns a receiver that fires once `finalize_transfer` completes.
     /// Used by Pull transfers so the browser-side handler can wait for the download to finish.
-    pub async fn start_transfer_with_notify(&self, id: Uuid, entries: Vec<TransferEntry>) -> oneshot::Receiver<()> {
-        tracing::info!("Starting to receive transfer (with notify): {} ({} entries)", id, entries.len());
+    pub async fn start_transfer_with_notify(&self, id: Uuid, entries: Vec<TransferEntry>, destination_path: String) -> oneshot::Receiver<()> {
+        tracing::info!("Starting to receive transfer (with notify): {} ({} entries) to {}", id, entries.len(), destination_path);
         let has_dirs = entries.iter().any(|e| e.is_dir);
         let (tx, rx) = oneshot::channel();
 
@@ -59,6 +61,7 @@ impl TransferReceiver {
             current_writer: None,
             bytes_written: 0,
             has_dirs,
+            destination_path,
             expected_total: None,
             completion_tx: Some(tx),
         });
@@ -88,9 +91,28 @@ impl TransferReceiver {
                     .map_err(|e| format!("Failed to create .drift dir: {}", e))?;
                 drift_dir.join(format!("{}.tar.gz", id))
             } else {
-                // Single file: write directly to root_dir
+                // Single file: write to destination directory using only the filename,
+                // not the full relative_path (which includes subdirectories from the sender side).
                 let entry = &transfer.entries[0];
-                self.root_dir.join(&entry.relative_path)
+                let file_name = std::path::Path::new(&entry.relative_path)
+                    .file_name()
+                    .ok_or_else(|| format!("Invalid path: {}", entry.relative_path))?;
+                let dest_path = self.root_dir.join(&transfer.destination_path).join(file_name);
+
+                // Validate that the path is within root_dir (path traversal protection)
+                let root_canonical = self.root_dir.canonicalize()
+                    .map_err(|e| format!("Invalid root: {}", e))?;
+                if let Some(parent) = dest_path.parent() {
+                    if parent.exists() {
+                        let parent_canonical = parent.canonicalize()
+                            .map_err(|e| format!("Invalid parent path: {}", e))?;
+                        if !parent_canonical.starts_with(&root_canonical) {
+                            return Err("Path traversal attempt blocked".to_string());
+                        }
+                    }
+                }
+
+                dest_path
             };
 
             tracing::info!("Creating writer for: {:?}", file_path);
@@ -168,8 +190,21 @@ impl TransferReceiver {
                 // If this was a directory transfer, decompress the archive
                 if has_dirs {
                     let archive_path = self.root_dir.join(".drift").join(format!("{}.tar.gz", id));
-                    tracing::info!("Decompressing archive: {:?}", archive_path);
-                    decompress::decompress_archive(&archive_path, &self.root_dir)
+                    let dest_dir = self.root_dir.join(&transfer.destination_path);
+
+                    // Validate destination directory (path traversal protection)
+                    if dest_dir.exists() {
+                        let dest_canonical = dest_dir.canonicalize()
+                            .map_err(|e| format!("Invalid destination: {}", e))?;
+                        let root_canonical = self.root_dir.canonicalize()
+                            .map_err(|e| format!("Invalid root: {}", e))?;
+                        if !dest_canonical.starts_with(&root_canonical) {
+                            return Err("Path traversal attempt blocked".to_string());
+                        }
+                    }
+
+                    tracing::info!("Decompressing archive {:?} to {:?}", archive_path, dest_dir);
+                    decompress::decompress_archive(&archive_path, &dest_dir)
                         .map_err(|e| format!("Failed to decompress: {}", e))?;
                 }
             }

@@ -3,12 +3,14 @@
 PORT ?= 8000
 TARGET ?=
 
-## Build the full project (frontend + backend)
+## Build the full project (frontend + backend, debug)
 build:
+	cd frontend && bun run build
 	cargo build
 
-## Release build
+## Release build (frontend + backend) — use this before manual testing
 release:
+	cd frontend && bun run build
 	cargo build --release
 
 ## Type-check without producing a binary

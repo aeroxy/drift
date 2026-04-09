@@ -62,6 +62,7 @@ async function pullEntries(ws: WsBrowserClient, entries: FileEntry[]): Promise<v
         permissions: entry.permissions,
       }],
       direction: 'Pull',
+      destination_path: '.',
     });
 
     await transferDone;
@@ -86,6 +87,7 @@ async function pushEntries(ws: WsBrowserClient, entries: FileEntry[]): Promise<v
         permissions: entry.permissions,
       }],
       direction: 'Push',
+      destination_path: '.',
     });
 
     await transferDone;

@@ -69,6 +69,7 @@ pub async fn send_file(
         id: transfer_id,
         entries: vec![entry],
         direction: Direction::Push,
+        destination_path: ".".to_string(),
     };
 
     send_encrypted_control(&crypto, &mut ws_write, &request).await?;

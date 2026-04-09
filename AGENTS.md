@@ -37,8 +37,13 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
 
 ## Build & Run
 
+**Always run both steps before manual testing** — the frontend must be built first, then Cargo embeds it:
+
 ```bash
-# Build (auto-builds frontend via build.rs)
+# build the React frontend
+cd frontend && bun run build && cd ..
+
+# build the Rust backend
 cargo build
 
 # Run server

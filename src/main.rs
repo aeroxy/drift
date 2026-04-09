@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "drift", about = "Encrypted file transfer over WebSocket")]
+#[command(name = "drift", about = "Encrypted file transfer over WebSocket", version = concat!("v", env!("CARGO_PKG_VERSION")))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

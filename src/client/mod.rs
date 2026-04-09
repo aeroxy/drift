@@ -299,13 +299,13 @@ async fn handle_incoming_request(
             hostname: state.config.hostname.clone(),
             root_dir: state.config.root_dir.to_string_lossy().to_string(),
         }),
-        ControlMessage::TransferRequest { id, entries, direction } => {
-            tracing::info!("Client received TransferRequest from server: id={}, entries={}, direction={:?}", id, entries.len(), direction);
+        ControlMessage::TransferRequest { id, entries, direction, destination_path } => {
+            tracing::info!("Client received TransferRequest from server: id={}, entries={}, direction={:?}, dest={}", id, entries.len(), direction, destination_path);
 
             use crate::protocol::messages::Direction;
             match direction {
                 Direction::Push => {
-                    state.transfer_receiver.start_transfer(id, entries.clone()).await;
+                    state.transfer_receiver.start_transfer(id, entries.clone(), destination_path).await;
                     Some(ControlMessage::TransferAccepted {
                         id,
                         resume_offsets: std::collections::HashMap::new(),

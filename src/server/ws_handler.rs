@@ -319,14 +319,15 @@ async fn handle_browser_message(
 ) {
     tracing::debug!("Browser message received: {:?}", msg);
     match msg {
-        ControlMessage::TransferRequest { id, entries, direction } => {
-            tracing::info!("Browser TransferRequest: id={}, entries={}, direction={:?}", id, entries.len(), direction);
+        ControlMessage::TransferRequest { id, entries, direction, destination_path } => {
+            tracing::info!("Browser TransferRequest: id={}, entries={}, direction={:?}, dest={}", id, entries.len(), direction, destination_path);
             tokio::spawn(async move {
                 browser_transfer::handle_browser_transfer(
                     state,
                     id,
                     entries,
                     direction,
+                    destination_path,
                     ws_tx,
                 ).await;
             });
@@ -366,14 +367,14 @@ async fn handle_server_to_server_request(
             hostname: state.config.hostname.clone(),
             root_dir: state.config.root_dir.to_string_lossy().to_string(),
         }),
-        ControlMessage::TransferRequest { id, entries, direction } => {
-            tracing::info!("Server received TransferRequest from client: id={}, entries={}, direction={:?}", id, entries.len(), direction);
+        ControlMessage::TransferRequest { id, entries, direction, destination_path } => {
+            tracing::info!("Server received TransferRequest from client: id={}, entries={}, direction={:?}, dest={}", id, entries.len(), direction, destination_path);
 
             use crate::protocol::messages::Direction;
             match direction {
                 Direction::Push => {
                     tracing::info!("Accepting push transfer, preparing to receive {} files", entries.len());
-                    state.transfer_receiver.start_transfer(id, entries.clone()).await;
+                    state.transfer_receiver.start_transfer(id, entries.clone(), destination_path).await;
                     Some(ControlMessage::TransferAccepted {
                         id,
                         resume_offsets: std::collections::HashMap::new(),

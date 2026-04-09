@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+fn default_destination() -> String {
+    ".".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ControlMessage {
@@ -31,6 +35,8 @@ pub enum ControlMessage {
         id: Uuid,
         entries: Vec<TransferEntry>,
         direction: Direction,
+        #[serde(default = "default_destination")]
+        destination_path: String,
     },
     TransferAccepted {
         id: Uuid,

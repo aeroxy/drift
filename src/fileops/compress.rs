@@ -29,8 +29,11 @@ pub fn compress_directory(root_dir: &Path, relative_path: &str) -> Result<(PathB
     let encoder = GzEncoder::new(file, Compression::fast());
     let mut archive = Builder::new(encoder);
 
-    // Add directory contents to archive with relative paths
-    archive.append_dir_all(relative_path, &source)
+    // Add directory contents to archive using only the directory's own name as prefix,
+    // not the full relative_path (which may include subdirectory prefixes from the sender).
+    let dir_name = source.file_name()
+        .ok_or_else(|| CompressError::Io("Invalid directory path".to_string()))?;
+    archive.append_dir_all(dir_name, &source)
         .map_err(|e| CompressError::Io(format!("Failed to archive directory: {}", e)))?;
 
     // Finalize

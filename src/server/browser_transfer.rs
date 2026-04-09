@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 use tokio::sync::mpsc;
@@ -10,14 +10,47 @@ use crate::server::{AppState, FrameChannel};
 use crate::fileops::reader::ChunkedReader;
 use crate::fileops::compress;
 
+/// Validate that a relative path resolves to a location within root_dir.
+/// Returns the validated path on success, or an error message on failure.
+fn validate_path(root_dir: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    let target = root_dir.join(relative_path);
+    match target.canonicalize() {
+        Ok(canonical) => {
+            let root_canonical = root_dir.canonicalize()
+                .map_err(|e| format!("Invalid root: {}", e))?;
+            if canonical.starts_with(&root_canonical) {
+                Ok(canonical)
+            } else {
+                Err("Path traversal attempt blocked".to_string())
+            }
+        }
+        // Path doesn't exist yet (for writes) - validate parent
+        Err(_) => {
+            if let Some(parent) = target.parent() {
+                if parent.exists() {
+                    let parent_canonical = parent.canonicalize()
+                        .map_err(|e| format!("Invalid parent: {}", e))?;
+                    let root_canonical = root_dir.canonicalize()
+                        .map_err(|e| format!("Invalid root: {}", e))?;
+                    if parent_canonical.starts_with(&root_canonical) {
+                        return Ok(target);
+                    }
+                }
+            }
+            Err("Invalid path".to_string())
+        }
+    }
+}
+
 pub async fn handle_browser_transfer(
     state: Arc<AppState>,
     id: Uuid,
     entries: Vec<TransferEntry>,
     direction: Direction,
+    destination_path: String,
     ws_tx: mpsc::UnboundedSender<Message>,
 ) {
-    tracing::info!("Browser transfer request: id={}, entries={}, direction={:?}", id, entries.len(), direction);
+    tracing::info!("Browser transfer request: id={}, entries={}, direction={:?}, dest={}", id, entries.len(), direction, destination_path);
 
     let remote = state.remote.read().await;
     if remote.is_none() {
@@ -29,7 +62,7 @@ pub async fn handle_browser_transfer(
     // Binary frames from the remote can arrive before TransferAccepted is processed,
     // so the receiver must be ready or chunks would be silently dropped (and lost).
     let pull_done_rx = if direction == Direction::Pull {
-        Some(state.transfer_receiver.start_transfer_with_notify(id, entries.clone()).await)
+        Some(state.transfer_receiver.start_transfer_with_notify(id, entries.clone(), destination_path.clone()).await)
     } else {
         None
     };
@@ -39,6 +72,7 @@ pub async fn handle_browser_transfer(
         id,
         entries: entries.clone(),
         direction: direction.clone(),
+        destination_path,
     };
 
     if let Some(ref remote_conn) = *remote {
@@ -105,6 +139,16 @@ pub async fn send_entries(
     let mut files_to_send: Vec<(String, PathBuf, u64, Option<PathBuf>)> = Vec::new();
 
     for entry in entries {
+        // Validate path before any file operations
+        if let Err(e) = validate_path(root_dir, &entry.relative_path) {
+            send_control(frame_tx, &ControlMessage::TransferError {
+                id,
+                error: format!("Invalid path {}: {}", entry.relative_path, e),
+            });
+            cleanup_archives(&files_to_send);
+            return;
+        }
+
         if entry.is_dir {
             match compress::compress_directory(root_dir, &entry.relative_path) {
                 Ok((archive_path, archive_size)) => {
@@ -188,6 +232,13 @@ async fn push_entries(
     let mut files_to_send: Vec<(String, PathBuf, u64, Option<PathBuf>)> = Vec::new();
 
     for entry in entries {
+        // Validate path before any file operations
+        if let Err(e) = validate_path(&state.config.root_dir, &entry.relative_path) {
+            send_error(ws_tx, id, &format!("Invalid path {}: {}", entry.relative_path, e));
+            cleanup_archives(&files_to_send);
+            return;
+        }
+
         if entry.is_dir {
             match compress::compress_directory(&state.config.root_dir, &entry.relative_path) {
                 Ok((archive_path, archive_size)) => {

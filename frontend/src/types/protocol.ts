@@ -37,7 +37,7 @@ export type ControlMessage =
   | { type: "BrowseResponse"; hostname: string; cwd: string; entries: FileEntry[] }
   | { type: "InfoRequest" }
   | { type: "InfoResponse"; hostname: string; root_dir: string }
-  | { type: "TransferRequest"; id: string; entries: TransferEntry[]; direction: "Push" | "Pull" }
+  | { type: "TransferRequest"; id: string; entries: TransferEntry[]; direction: "Push" | "Pull"; destination_path: string }
   | { type: "TransferProgress"; id: string; path: string; bytes_done: number; bytes_total: number }
   | { type: "TransferComplete"; id: string; total_bytes: number }
   | { type: "TransferFinalized"; id: string }
