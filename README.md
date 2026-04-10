@@ -115,6 +115,17 @@ drift serve --port 8000 --password mysecret
 drift serve --port 9000 --target 192.168.0.2:8000 --password mysecret
 ```
 
+## Why WebSockets?
+
+While protocols like WebRTC DataChannels or QUIC offer better raw performance for large file transfers, they are frequently blocked or unavailable in:
+
+- Containerized environments (Docker, Kubernetes)
+- Corporate firewalls and proxies
+- SGX/TEE enclaves
+- Serverless and PaaS platforms
+
+WebSockets run over plain HTTP/HTTPS (port 80/443), making drift work anywhere a browser does.
+
 ## How It Works
 
 1. **Machine A** starts a WebSocket server on the specified port
