@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, Wifi, WifiOff, Loader2 } from "lucide-react";
 interface ToolbarProps {
   connected: boolean;
   hasRemote: boolean;
+  fingerprint: string | null;
   localSelected: number;
   remoteSelected: number;
   onCopyToRemote: () => void;
@@ -13,6 +14,7 @@ interface ToolbarProps {
 export default function Toolbar({
   connected,
   hasRemote,
+  fingerprint,
   localSelected,
   remoteSelected,
   onCopyToRemote,
@@ -43,6 +45,11 @@ export default function Toolbar({
         <span className="text-xs text-zinc-400">
           {hasRemote ? (connected ? "Connected" : "Reconnecting...") : "No remote"}
         </span>
+        {fingerprint && hasRemote && (
+          <span className="text-xs font-mono text-amber-400/80" title="Connection fingerprint — verify this matches the remote terminal">
+            {fingerprint}
+          </span>
+        )}
       </div>
 
       <button

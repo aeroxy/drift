@@ -47,8 +47,9 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     if let Ok(ControlMessage::KeyExchange { public_key }) = serde_json::from_str(&first_msg) {
         tracing::info!("Server-to-server connection detected, completing handshake");
 
-        use crate::crypto::handshake::{decode_public_key, derive_shared_secret};
+        use crate::crypto::handshake::{decode_public_key, derive_shared_secret, fingerprint, generate_nonce, verify_auth_proof};
         use crate::crypto::stream::CryptoStream;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
         let client_public = match decode_public_key(&public_key) {
             Ok(pk) => pk,
@@ -58,11 +59,55 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let shared_secret = derive_shared_secret(server_keypair.secret, &client_public);
         let crypto = Arc::new(CryptoStream::from_shared_secret(&shared_secret, true));
 
+        // Password authentication: if configured, challenge the client
+        if let Some(ref password) = state.config.password {
+            let nonce = generate_nonce();
+            let challenge = ControlMessage::AuthChallenge {
+                nonce: BASE64.encode(&nonce),
+            };
+            if sender.send(Message::Text(serde_json::to_string(&challenge).unwrap().into())).await.is_err() {
+                return;
+            }
+
+            let proof_bytes = match receiver.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(ControlMessage::AuthResponse { proof }) = serde_json::from_str(&text) {
+                        match BASE64.decode(&proof) {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
+                                tracing::error!("Invalid auth proof encoding");
+                                let _ = sender.send(Message::Text(serde_json::to_string(&ControlMessage::Error { message: "authentication failed".into() }).unwrap().into())).await;
+                                return;
+                            }
+                        }
+                    } else {
+                        tracing::error!("Expected AuthResponse, got: {}", &text[..text.len().min(100)]);
+                        let _ = sender.send(Message::Text(serde_json::to_string(&ControlMessage::Error { message: "authentication failed".into() }).unwrap().into())).await;
+                        return;
+                    }
+                }
+                _ => {
+                    tracing::error!("Connection closed during authentication");
+                    return;
+                }
+            };
+
+            if !verify_auth_proof(password, &nonce, &shared_secret, &proof_bytes) {
+                tracing::error!("Authentication failed: invalid password");
+                let _ = sender.send(Message::Text(serde_json::to_string(&ControlMessage::Error { message: "authentication failed".into() }).unwrap().into())).await;
+                return;
+            }
+
+            tracing::info!("Password authentication successful");
+        }
+
         if sender.send(Message::Text(serde_json::to_string(&ControlMessage::HandshakeComplete).unwrap().into())).await.is_err() {
             return;
         }
 
-        tracing::info!("Handshake complete, encrypted connection established");
+        let fp = fingerprint(&shared_secret);
+        tracing::info!("Handshake complete, encrypted connection established (fingerprint: {})", fp);
+        *state.fingerprint.write().await = Some(fp);
 
         // Single unified outbound channel: pre-encoded frames (type byte + payload).
         // All outbound messages — data chunks AND control messages — go through this
@@ -253,6 +298,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             let mut remote = state.remote.write().await;
             *remote = None;
         }
+        *state.fingerprint.write().await = None;
         let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: false });
 
         tracing::info!("Server-to-server connection closed");

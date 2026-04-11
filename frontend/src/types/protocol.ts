@@ -23,6 +23,7 @@ export interface InfoResponse {
   hostname: string;
   root_dir: string;
   has_remote: boolean;
+  fingerprint: string | null;
 }
 
 export interface TransferProgress {

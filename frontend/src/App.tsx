@@ -25,6 +25,7 @@ export default function App() {
   const [remotePath, setRemotePath] = useState(".");
   const [remoteSelected, setRemoteSelected] = useState<Set<string>>(new Set());
   const [hasRemote, setHasRemote] = useState(false);
+  const [fingerprint, setFingerprint] = useState<string | null>(null);
 
   // Error notification
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +54,7 @@ export default function App() {
       const r = await fetch("/api/info");
       const info: InfoResponse = await r.json();
       setHasRemote(info.has_remote);
+      setFingerprint(info.fingerprint ?? null);
       if (!info.has_remote) {
         setRemoteEntries([]);
         setRemoteInfo({ hostname: "...", cwd: "..." });
@@ -88,6 +90,9 @@ export default function App() {
           setRemoteInfo({ hostname: "...", cwd: "..." });
           setRemotePath(".");
           setRemoteSelected(new Set());
+          setFingerprint(null);
+        } else {
+          fetchRemoteStatus();
         }
         break;
       case "TransferProgress":
@@ -285,6 +290,7 @@ export default function App() {
       <Toolbar
         connected={connected}
         hasRemote={hasRemote}
+        fingerprint={fingerprint}
         localSelected={localSelected.size}
         remoteSelected={remoteSelected.size}
         onCopyToRemote={handleCopyToRemote}

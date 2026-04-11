@@ -54,13 +54,16 @@ pub struct InfoResponse {
     pub hostname: String,
     pub root_dir: String,
     pub has_remote: bool,
+    pub fingerprint: Option<String>,
 }
 
 pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
     let has_remote = state.remote.read().await.is_some();
+    let fingerprint = state.fingerprint.read().await.clone();
     Json(InfoResponse {
         hostname: state.config.hostname.clone(),
         root_dir: state.config.root_dir.to_string_lossy().to_string(),
         has_remote,
+        fingerprint,
     })
 }

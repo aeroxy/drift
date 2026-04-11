@@ -82,8 +82,9 @@ pub async fn connect_to_remote(
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    let crypto = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
-    tracing::info!("Handshake complete, connection encrypted");
+    let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    tracing::info!("Handshake complete, connection encrypted (fingerprint: {})", fp);
+    *state.fingerprint.write().await = Some(fp);
 
     let crypto = Arc::new(crypto);
 
@@ -349,7 +350,7 @@ pub async fn perform_client_handshake(
     ws_write: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>,
     ws_read: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
     password: &Option<String>,
-) -> anyhow::Result<CryptoStream> {
+) -> anyhow::Result<(CryptoStream, String)> {
     let client_keypair = KeyPair::generate();
 
     let server_public = match ws_read.next().await {
@@ -371,18 +372,54 @@ pub async fn perform_client_handshake(
 
     let shared_secret = derive_shared_secret(client_keypair.secret, &server_public);
 
-    if password.is_some() {
-        tracing::warn!("Password authentication not yet implemented");
-    }
-
+    // Wait for either AuthChallenge (password required) or HandshakeComplete (no auth)
     match ws_read.next().await {
         Some(Ok(Message::Text(text))) => {
-            if !matches!(serde_json::from_str::<ControlMessage>(&text)?, ControlMessage::HandshakeComplete) {
-                anyhow::bail!("Expected HandshakeComplete message");
+            let msg: ControlMessage = serde_json::from_str(&text)?;
+            match msg {
+                ControlMessage::AuthChallenge { nonce } => {
+                    let password = password.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Server requires a password (use --password)"))?;
+
+                    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                    use crate::crypto::handshake::create_auth_proof;
+
+                    let nonce_bytes = BASE64.decode(&nonce)?;
+                    let proof = create_auth_proof(password, &nonce_bytes, &shared_secret);
+                    let response = ControlMessage::AuthResponse {
+                        proof: BASE64.encode(&proof),
+                    };
+                    ws_write.send(Message::Text(serde_json::to_string(&response)?.into())).await?;
+
+                    // Now wait for HandshakeComplete or Error
+                    match ws_read.next().await {
+                        Some(Ok(Message::Text(text2))) => {
+                            let msg2: ControlMessage = serde_json::from_str(&text2)?;
+                            match msg2 {
+                                ControlMessage::HandshakeComplete => {}
+                                ControlMessage::Error { message } => {
+                                    anyhow::bail!("Authentication failed: {}", message);
+                                }
+                                _ => anyhow::bail!("Expected HandshakeComplete after auth"),
+                            }
+                        }
+                        _ => anyhow::bail!("Connection closed during authentication"),
+                    }
+                }
+                ControlMessage::HandshakeComplete => {
+                    if password.is_some() {
+                        tracing::warn!("Connected without authentication — server has no password set");
+                    }
+                }
+                ControlMessage::Error { message } => {
+                    anyhow::bail!("Handshake error: {}", message);
+                }
+                _ => anyhow::bail!("Expected AuthChallenge or HandshakeComplete"),
             }
         }
-        _ => anyhow::bail!("Failed to receive HandshakeComplete"),
+        _ => anyhow::bail!("Failed to receive handshake message"),
     }
 
-    Ok(CryptoStream::from_shared_secret(&shared_secret, false))
+    let fp = crate::crypto::handshake::fingerprint(&shared_secret);
+    Ok((CryptoStream::from_shared_secret(&shared_secret, false), fp))
 }

@@ -50,8 +50,8 @@ pub async fn send_file(
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    let crypto = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
-    tracing::info!("Encrypted connection established");
+    let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    tracing::info!("Encrypted connection established (fingerprint: {})", fp);
 
     let transfer_id = Uuid::new_v4();
     let entry = TransferEntry {

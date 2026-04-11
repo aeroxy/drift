@@ -16,7 +16,8 @@ pub async fn browse_remote(
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    let crypto = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    tracing::info!("Encrypted connection established (fingerprint: {})", fp);
 
     let browse_path = path.unwrap_or(".").to_string();
     send_encrypted_control(&crypto, &mut ws_write, &ControlMessage::BrowseRequest {

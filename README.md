@@ -117,14 +117,16 @@ drift serve --port 9000 --target 192.168.0.2:8000 --password mysecret
 
 ## Why WebSockets?
 
-While protocols like WebRTC DataChannels or QUIC offer better raw performance for large file transfers, they are frequently blocked or unavailable in:
+Many modern file transfer tools optimize for maximum throughput using UDP-based protocols (WebRTC DataChannels, QUIC, etc.). Those can be faster for large files, but they routinely fail in the environments where you actually need ad-hoc transfers.
 
-- Containerized environments (Docker, Kubernetes)
-- Corporate firewalls and proxies
-- SGX/TEE enclaves
-- Serverless and PaaS platforms
+drift prioritizes maximum compatibility and zero configuration:
 
-WebSockets run over plain HTTP/HTTPS (port 80/443), making drift work anywhere a browser does.
+- **Works out of the box on cloud GPU providers, serverless platforms, and inference hosts** — most only permit outbound HTTP/WebSocket; no firewall exceptions needed
+- **Runs reliably inside Docker and Kubernetes pods** — no UDP, no port-forwarding, no network admin required
+- **No auxiliary infrastructure** — no STUN/TURN servers, no hole-punching, no coordination service
+- **Friction-free for AI agents** — agents can exchange code, CSVs, model weights, and logs without any setup beyond a single binary
+
+**Trade-off:** TCP head-of-line blocking means slightly lower throughput on very large files compared to UDP-based solutions. For the primary use case — fast, secure exchange of artifacts between machines — this is an acceptable trade. Future versions may add optional QUIC/WebTransport support for less restricted environments.
 
 ## How It Works
 

@@ -26,6 +26,8 @@ pub struct AppState {
     pub pending_completions: Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
     /// Broadcast channel for pushing events (ConnectionStatus etc.) to all browsers.
     pub browser_events: broadcast::Sender<ControlMessage>,
+    /// Short hex fingerprint of the DH shared secret (for visual MITM verification).
+    pub fingerprint: RwLock<Option<String>>,
 }
 
 pub type ResponseChannel = oneshot::Sender<ControlMessage>;
@@ -57,6 +59,7 @@ impl AppState {
             transfer_receiver,
             pending_completions: Mutex::new(HashMap::new()),
             browser_events,
+            fingerprint: RwLock::new(None),
         }
     }
 }

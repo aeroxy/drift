@@ -9,9 +9,28 @@ Implemented in `src/crypto/handshake.rs`.
 1. **Server** generates an ephemeral X25519 keypair and sends its public key as `KeyExchange { public_key: base64 }`.
 2. **Client** generates its own ephemeral keypair, sends its public key, and computes the shared secret via Diffie-Hellman: `shared_secret = DH(client_secret, server_public)`.
 3. **Server** computes the same shared secret: `shared_secret = DH(server_secret, client_public)`.
-4. **Server** sends `HandshakeComplete`.
+4. If `--password` is set on the server, **password authentication** occurs (see below).
+5. **Server** sends `HandshakeComplete`.
 
 The shared secret is 32 bytes of X25519 output.
+
+## Password Authentication (MITM Protection)
+
+When the server has `--password` configured, a challenge-response exchange occurs after the DH key exchange but before `HandshakeComplete`. This binds the password to the shared secret, preventing man-in-the-middle attacks — an attacker completing independent DH with each side gets different shared secrets and cannot produce valid proofs.
+
+```
+Server                          Client
+  |--- AuthChallenge {nonce} ---->|
+  |<-- AuthResponse {proof}  ----|
+  |   (verify proof)             |
+  |--- HandshakeComplete ------->|   (or Error if proof invalid)
+```
+
+- **Nonce**: 32 random bytes (base64-encoded), generated per connection
+- **Proof**: `HMAC-SHA256(password, nonce || shared_secret)` (base64-encoded)
+- **Verification**: Server recomputes the HMAC and compares (constant-time via `hmac` crate)
+
+If the client has no password but the server requires one, the client exits with an error. If the client has a password but the server doesn't challenge, a warning is logged.
 
 ## Key Derivation (HKDF-SHA256)
 
@@ -76,5 +95,6 @@ encode_data_frame(id, offset, chunk) → raw bytes → encrypt(raw bytes) → WS
 ## Important Notes
 
 - **No nonce persistence across reconnects** — counters reset to 0 on each new connection. A dropped connection requires a full new handshake.
-- **No authentication** — the `--password` flag exists in CLI args but HMAC-based auth is not yet implemented.
+- **Password authentication** — when `--password` is set, HMAC-SHA256 proof binds the password to the DH shared secret, preventing MITM attacks. Both sides must use the same password.
+- **Fingerprint verification** — after every handshake, a 6-character hex fingerprint (`SHA-256(shared_secret)[0..3]`) is logged in both terminals and shown in the web UI toolbar. Users can compare out-of-band (e.g. via Telegram) to detect MITM even without a password.
 - **Ephemeral keys** — each connection generates fresh X25519 keypairs; there is no long-term identity.

@@ -9,18 +9,21 @@ interface DriftProcessOptions {
   port: number;
   cwd: string;
   target?: string;
+  password?: string;
 }
 
 export class DriftProcess {
   readonly port: number;
   readonly cwd: string;
   readonly target?: string;
+  readonly password?: string;
   private proc: ChildProcess | null = null;
 
   constructor(opts: DriftProcessOptions) {
     this.port = opts.port;
     this.cwd = opts.cwd;
     this.target = opts.target;
+    this.password = opts.password;
   }
 
   get baseUrl() {
@@ -41,6 +44,9 @@ export class DriftProcess {
       const args = ['serve', '--port', String(this.port)];
       if (this.target) {
         args.push('--target', this.target);
+      }
+      if (this.password) {
+        args.push('--password', this.password);
       }
 
       this.proc = spawn(BINARY, args, {

@@ -351,7 +351,7 @@ describe('drift integration', () => {
     }
   }, 120_000);
 
-  it('verifies .drift temp cleanup', async () => {
+  it('verifies .drift temp cleanup (after push/pull)', async () => {
     // Both sides should clean up their .drift/ temp dir after transfers.
     // Poll briefly in case finalize is still running.
     const deadline = Date.now() + 30_000;
@@ -370,4 +370,65 @@ describe('drift integration', () => {
       ).toHaveLength(0);
     }
   }, 60_000);
+});
+
+describe('password authentication', () => {
+  const hostDir = path.join(TEST_RESOURCES, 'host');
+  let hostPort: number;
+  let clientPort: number;
+  let hostProc: DriftProcess;
+
+  beforeAll(async () => {
+    hostPort = await getAvailablePort();
+    clientPort = await getAvailablePort();
+  });
+
+  afterAll(async () => {
+    if (hostProc) await hostProc.stop();
+  });
+
+  it('connects with matching passwords', async () => {
+    hostProc = new DriftProcess({ port: hostPort, cwd: hostDir, password: 'test-secret' });
+    await hostProc.start();
+
+    const output = runDriftCli(
+      ['ls', '--target', `127.0.0.1:${hostPort}`, '--password', 'test-secret', '.'],
+      { cwd: hostDir },
+    );
+    expect(output).toBeTruthy();
+
+    await hostProc.stop();
+  }, 30_000);
+
+  it('rejects wrong password', () => {
+    expect(async () => {
+      hostProc = new DriftProcess({ port: await getAvailablePort(), cwd: hostDir, password: 'correct' });
+      await hostProc.start();
+
+      try {
+        runDriftCli(
+          ['ls', '--target', `127.0.0.1:${hostProc.port}`, '--password', 'wrong', '.'],
+          { cwd: hostDir },
+        );
+      } finally {
+        await hostProc.stop();
+      }
+    }).rejects.toThrow();
+  }, 30_000);
+
+  it('rejects client with no password when server requires one', () => {
+    expect(async () => {
+      hostProc = new DriftProcess({ port: await getAvailablePort(), cwd: hostDir, password: 'required' });
+      await hostProc.start();
+
+      try {
+        runDriftCli(
+          ['ls', '--target', `127.0.0.1:${hostProc.port}`, '.'],
+          { cwd: hostDir },
+        );
+      } finally {
+        await hostProc.stop();
+      }
+    }).rejects.toThrow();
+  }, 30_000);
 });

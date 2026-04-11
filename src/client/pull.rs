@@ -24,8 +24,8 @@ pub async fn pull_remote(
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    let crypto = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
-    tracing::info!("Encrypted connection established");
+    let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    tracing::info!("Encrypted connection established (fingerprint: {})", fp);
 
     // Discover file metadata by browsing the parent directory
     let (parent, file_name) = split_remote_path(remote_path);
