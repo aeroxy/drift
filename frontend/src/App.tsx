@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { BrowseResponse, ControlMessage, FileEntry, InfoResponse, TransferEntry } from "./types/protocol";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useTransfer } from "./hooks/useTransfer";
@@ -30,10 +30,13 @@ export default function App() {
   // Error notification
   const [error, setError] = useState<string | null>(null);
 
+  // Tracks the last successfully browsed remote path (for reverting on WS Error)
+  const lastGoodRemotePathRef = useRef(".");
+
   const { transfers, startTransfer, updateProgress, completeTransfer, failTransfer, hasActiveTransfers } = useTransfer();
 
   // Fetch local file listing via REST
-  const fetchLocal = useCallback(async (path: string) => {
+  const fetchLocal = useCallback(async (path: string): Promise<boolean> => {
     setLocalLoading(true);
     try {
       const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
@@ -42,7 +45,9 @@ export default function App() {
         setLocalInfo({ hostname: data.hostname, cwd: data.cwd });
         setLocalEntries(data.entries);
         setLocalSelected(new Set());
+        return true;
       }
+      return false;
     } finally {
       setLocalLoading(false);
     }
@@ -79,6 +84,7 @@ export default function App() {
   const { connected, send } = useWebSocket((msg: ControlMessage) => {
     switch (msg.type) {
       case "BrowseResponse":
+        lastGoodRemotePathRef.current = msg.cwd;
         setRemoteInfo({ hostname: msg.hostname, cwd: msg.cwd });
         setRemoteEntries(msg.entries);
         setRemoteSelected(new Set());
@@ -111,6 +117,7 @@ export default function App() {
         break;
       case "Error":
         setError(msg.message);
+        setRemotePath(lastGoodRemotePathRef.current);
         setTimeout(() => setError(null), 5000);
         break;
     }
@@ -185,6 +192,57 @@ export default function App() {
     },
     [remotePath, send],
   );
+
+  const handleLocalNavigateTo = useCallback(
+    async (absolutePath: string) => {
+      const success = await fetchLocal(absolutePath);
+      if (success) {
+        setLocalPath(absolutePath);
+      } else {
+        setError(`Path not found: ${absolutePath}`);
+        setTimeout(() => setError(null), 5000);
+      }
+    },
+    [fetchLocal],
+  );
+
+  const handleRemoteNavigateTo = useCallback(
+    (absolutePath: string) => {
+      if (!connected || !hasRemote) return;
+      setRemotePath(absolutePath);
+      send({ type: "BrowseRequest", path: absolutePath });
+    },
+    [connected, hasRemote, send],
+  );
+
+  const fetchLocalSuggestions = useCallback(async (inputValue: string): Promise<string[]> => {
+    const lastSlash = inputValue.lastIndexOf("/");
+    const parentDir = lastSlash > 0 ? inputValue.slice(0, lastSlash) : "/";
+    const prefix = inputValue.slice(lastSlash + 1).toLowerCase();
+    try {
+      const res = await fetch(`/api/browse?path=${encodeURIComponent(parentDir)}`);
+      if (!res.ok) return [];
+      const data: BrowseResponse = await res.json();
+      return data.entries
+        .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
+        .map((e) => `${data.cwd}/${e.name}`);
+    } catch {
+      return [];
+    }
+  }, []);
+
+  // Remote suggestions come from the already-fetched remoteEntries for the current directory.
+  // Only suggests when the typed parent dir matches the currently viewed remote directory.
+  const fetchRemoteSuggestions = useCallback(async (inputValue: string): Promise<string[]> => {
+    if (!remoteInfo.cwd || remoteInfo.cwd === "...") return [];
+    const lastSlash = inputValue.lastIndexOf("/");
+    const parentDir = lastSlash > 0 ? inputValue.slice(0, lastSlash) : "/";
+    const prefix = inputValue.slice(lastSlash + 1).toLowerCase();
+    if (parentDir !== remoteInfo.cwd) return [];
+    return remoteEntries
+      .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
+      .map((e) => `${remoteInfo.cwd}/${e.name}`);
+  }, [remoteEntries, remoteInfo.cwd]);
 
   // Transfer actions
   const handleCopyToRemote = useCallback(() => {
@@ -275,7 +333,7 @@ export default function App() {
       <header className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/50">
         <div className="flex items-center gap-3">
           <img src="/logo.svg" alt="drift" className="h-6 invert-0 brightness-0 invert" style={{ filter: "brightness(0) invert(1) sepia(1) saturate(5) hue-rotate(120deg)" }} />
-          <span className="text-xs text-zinc-600 font-mono">v0.1.0</span>
+          <span className="text-xs text-zinc-600 font-mono">v0.1.4</span>
         </div>
       </header>
 
@@ -308,7 +366,9 @@ export default function App() {
           selected={localSelected}
           onSelect={handleLocalSelect}
           onNavigate={handleLocalNavigate}
+          onNavigateTo={handleLocalNavigateTo}
           onRefresh={() => fetchLocal(localPath)}
+          fetchSuggestions={fetchLocalSuggestions}
           transfers={activeTransfers.filter(() => true)}
           loading={localLoading}
         />
@@ -320,10 +380,12 @@ export default function App() {
           selected={remoteSelected}
           onSelect={handleRemoteSelect}
           onNavigate={handleRemoteNavigate}
+          onNavigateTo={handleRemoteNavigateTo}
           onRefresh={refreshRemote}
           connected={hasRemote ? connected : undefined}
           transfers={[]}
           loading={false}
+          fetchSuggestions={fetchRemoteSuggestions}
         />
       </div>
     </div>

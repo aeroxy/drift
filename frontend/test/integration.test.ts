@@ -351,6 +351,63 @@ describe('drift integration', () => {
     }
   }, 120_000);
 
+  it('browses to an absolute path via REST /api/browse', async () => {
+    // Get the host's resolved absolute cwd
+    const rootRes = await fetch(`${host.baseUrl}/api/browse?path=.`);
+    const rootData: BrowseResponse = await rootRes.json();
+    const absoluteCwd = rootData.cwd;
+
+    // Browsing by absolute path should return the same result as browsing by "."
+    const res = await fetch(`${host.baseUrl}/api/browse?path=${encodeURIComponent(absoluteCwd)}`);
+    expect(res.ok, `absolute path browse should succeed for "${absoluteCwd}"`).toBe(true);
+    const data: BrowseResponse = await res.json();
+    expect(data.cwd).toBe(absoluteCwd);
+    expect(data.entries.length).toBe(rootData.entries.length);
+  }, 15_000);
+
+  it('returns non-OK for non-existent path via REST /api/browse', async () => {
+    const res = await fetch(`${host.baseUrl}/api/browse?path=/nonexistent-drift-test-path`);
+    expect(res.ok, 'non-existent path should return non-OK').toBe(false);
+  }, 15_000);
+
+  it('browses to an absolute path via WebSocket BrowseRequest', async () => {
+    // BrowseRequest is forwarded to the remote (client), so use client's absolute root
+    const clientRootRes = await fetch(`${client.baseUrl}/api/browse?path=.`);
+    const clientRootData: BrowseResponse = await clientRootRes.json();
+    const clientAbsoluteCwd = clientRootData.cwd;
+
+    const ws = await WsBrowserClient.connect(host.wsUrl);
+    try {
+      const browsePromise = ws.waitForMessage(
+        (msg) => msg.type === 'BrowseResponse',
+        10_000,
+      );
+      ws.send({ type: 'BrowseRequest', path: clientAbsoluteCwd });
+      const msg = await browsePromise;
+      expect(msg.type).toBe('BrowseResponse');
+      if (msg.type === 'BrowseResponse') {
+        expect(msg.cwd).toBe(clientAbsoluteCwd);
+      }
+    } finally {
+      ws.close();
+    }
+  }, 15_000);
+
+  it('returns Error for non-existent path via WebSocket BrowseRequest', async () => {
+    const ws = await WsBrowserClient.connect(host.wsUrl);
+    try {
+      const errorPromise = ws.waitForMessage(
+        (msg) => msg.type === 'Error',
+        10_000,
+      );
+      ws.send({ type: 'BrowseRequest', path: '/nonexistent-drift-test-path' });
+      const msg = await errorPromise;
+      expect(msg.type).toBe('Error');
+    } finally {
+      ws.close();
+    }
+  }, 15_000);
+
   it('verifies .drift temp cleanup (after push/pull)', async () => {
     // Both sides should clean up their .drift/ temp dir after transfers.
     // Poll briefly in case finalize is still running.

@@ -13,10 +13,12 @@ interface FilePaneProps {
   selected: Set<string>;
   onSelect: (name: string, multi: boolean) => void;
   onNavigate: (path: string) => void;
+  onNavigateTo: (absolutePath: string) => void;
   onRefresh: () => void;
   connected?: boolean;
   transfers: Transfer[];
   loading?: boolean;
+  fetchSuggestions?: (input: string) => Promise<string[]>;
 }
 
 export default function FilePane({
@@ -26,10 +28,12 @@ export default function FilePane({
   selected,
   onSelect,
   onNavigate,
+  onNavigateTo,
   onRefresh,
   connected,
   transfers,
   loading,
+  fetchSuggestions,
 }: FilePaneProps) {
   const handleGoUp = useCallback(() => {
     const parts = cwd.split("/").filter(Boolean);
@@ -40,7 +44,7 @@ export default function FilePane({
 
   return (
     <div className="flex flex-col h-full bg-zinc-900/30 border border-zinc-800 rounded-lg overflow-hidden">
-      <PathBar hostname={hostname} cwd={cwd} connected={connected} onRefresh={onRefresh} />
+      <PathBar hostname={hostname} cwd={cwd} connected={connected} onRefresh={onRefresh} onNavigateTo={onNavigateTo} fetchSuggestions={fetchSuggestions} />
       {loading ? (
         <div className="flex-1 flex items-center justify-center">
           <div className="w-5 h-5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
