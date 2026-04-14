@@ -71,6 +71,11 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIndex((i) => Math.max(i - 1, -1));
+    } else if (e.key === "Tab" && suggestions.length > 0) {
+      e.preventDefault();
+      const selected = activeIndex >= 0 ? suggestions[activeIndex] : suggestions[0];
+      setInputValue(selected + "/");
+      setActiveIndex(-1);
     }
   };
 

@@ -333,7 +333,7 @@ export default function App() {
       <header className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/50">
         <div className="flex items-center gap-3">
           <img src="/logo.svg" alt="drift" className="h-6 invert-0 brightness-0 invert" style={{ filter: "brightness(0) invert(1) sepia(1) saturate(5) hue-rotate(120deg)" }} />
-          <span className="text-xs text-zinc-600 font-mono">v0.1.4</span>
+          <span className="text-xs text-zinc-600 font-mono">v0.1.5</span>
         </div>
       </header>
 
