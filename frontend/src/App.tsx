@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { BrowseResponse, ControlMessage, FileEntry, InfoResponse, TransferEntry } from "./types/protocol";
+import type { BrowseResponse, ConnectResponse, ControlMessage, FileEntry, InfoResponse, TransferEntry } from "./types/protocol";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useTransfer } from "./hooks/useTransfer";
+import ConnectionModal from "./components/ConnectionModal";
 import FilePane from "./components/FilePane";
 import Toolbar from "./components/Toolbar";
 
@@ -26,6 +27,12 @@ export default function App() {
   const [remoteSelected, setRemoteSelected] = useState<Set<string>>(new Set());
   const [hasRemote, setHasRemote] = useState(false);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
+  const [remoteHostname, setRemoteHostname] = useState<string | undefined>(undefined);
+
+  // Connection modal state
+  const [showConnectModal, setShowConnectModal] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | undefined>(undefined);
 
   // Error notification
   const [error, setError] = useState<string | null>(null);
@@ -63,9 +70,45 @@ export default function App() {
       if (!info.has_remote) {
         setRemoteEntries([]);
         setRemoteInfo({ hostname: "...", cwd: "..." });
+        setRemoteHostname(undefined);
         setRemotePath(".");
         setRemoteSelected(new Set());
       }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const handleConnect = useCallback(async (target: string, password?: string) => {
+    setConnecting(true);
+    setConnectError(undefined);
+    try {
+      const res = await fetch("/api/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target, password: password ?? null }),
+      });
+      const data: ConnectResponse = await res.json();
+      if (data.success) {
+        setShowConnectModal(false);
+        setFingerprint(data.fingerprint ?? null);
+        // The ConnectionStatus WS event was broadcast before the browser's WS
+        // entered the listening path, so poll /api/info directly instead.
+        await fetchRemoteStatus();
+      } else {
+        setConnectError(data.error ?? "Connection failed");
+      }
+    } catch {
+      setConnectError("Network error");
+    } finally {
+      setConnecting(false);
+    }
+  }, []);
+
+  const handleDisconnect = useCallback(async () => {
+    try {
+      await fetch("/api/disconnect", { method: "POST" });
+      // ConnectionStatus { has_remote: false } arrives via WebSocket
     } catch {
       // ignore
     }
@@ -86,6 +129,7 @@ export default function App() {
       case "BrowseResponse":
         lastGoodRemotePathRef.current = msg.cwd;
         setRemoteInfo({ hostname: msg.hostname, cwd: msg.cwd });
+        setRemoteHostname(msg.hostname);
         setRemoteEntries(msg.entries);
         setRemoteSelected(new Set());
         break;
@@ -94,6 +138,7 @@ export default function App() {
         if (!msg.has_remote) {
           setRemoteEntries([]);
           setRemoteInfo({ hostname: "...", cwd: "..." });
+          setRemoteHostname(undefined);
           setRemotePath(".");
           setRemoteSelected(new Set());
           setFingerprint(null);
@@ -333,7 +378,7 @@ export default function App() {
       <header className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/50">
         <div className="flex items-center gap-3">
           <img src="/logo.svg" alt="drift" className="h-6 invert-0 brightness-0 invert" style={{ filter: "brightness(0) invert(1) sepia(1) saturate(5) hue-rotate(120deg)" }} />
-          <span className="text-xs text-zinc-600 font-mono">v0.1.5</span>
+          <span className="text-xs text-zinc-600 font-mono">v0.1.6</span>
         </div>
       </header>
 
@@ -349,12 +394,26 @@ export default function App() {
         connected={connected}
         hasRemote={hasRemote}
         fingerprint={fingerprint}
+        remoteHostname={remoteHostname}
         localSelected={localSelected.size}
         remoteSelected={remoteSelected.size}
         onCopyToRemote={handleCopyToRemote}
         onCopyToLocal={handleCopyToLocal}
         transferring={hasActiveTransfers}
+        onConnect={() => { setConnectError(undefined); setShowConnectModal(true); }}
+        onDisconnect={handleDisconnect}
+        connecting={connecting}
       />
+
+      {/* Connection modal */}
+      {showConnectModal && (
+        <ConnectionModal
+          onSubmit={handleConnect}
+          onCancel={() => { setShowConnectModal(false); setConnectError(undefined); }}
+          error={connectError}
+          connecting={connecting}
+        />
+      )}
 
       {/* Two-pane layout */}
       <div className="flex-1 grid grid-cols-2 gap-2 px-2 pb-2 min-h-0">

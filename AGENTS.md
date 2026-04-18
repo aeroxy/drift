@@ -46,6 +46,9 @@ cd frontend && bun run build && cd ..
 # build the Rust backend
 cargo build
 
+# Run without a port (OS picks a free port and logs it)
+cargo run -- serve
+
 # Run server
 cargo run -- serve --port 8000
 cargo run -- serve --port 8000 --target 192.168.0.2:8000 --password secret

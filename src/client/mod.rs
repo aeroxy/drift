@@ -104,7 +104,7 @@ pub async fn connect_to_remote(
 
     // Request handler: tracks pending responses
     let frame_tx_request = frame_tx.clone();
-    tokio::spawn(async move {
+    let request_handle = tokio::spawn(async move {
         while let Some((msg, response_tx)) = request_rx.recv().await {
             let id = Uuid::new_v4();
             pending_request.lock().await.insert(id, response_tx);
@@ -114,7 +114,7 @@ pub async fn connect_to_remote(
     });
 
     // Write task: encrypt each frame, send as binary WS frame
-    let write_task = tokio::spawn(async move {
+    let write_handle = tokio::spawn(async move {
         while let Some(frame) = frame_rx.recv().await {
             match crypto_write.encrypt(&frame) {
                 Ok(ciphertext) => {
@@ -131,7 +131,7 @@ pub async fn connect_to_remote(
     });
 
     // Read task: decrypt each binary frame, dispatch by type byte
-    let read_task = tokio::spawn(async move {
+    let read_handle = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_read.next().await {
             match msg {
                 Message::Binary(encrypted_data) => {
@@ -235,7 +235,7 @@ pub async fn connect_to_remote(
         }
     });
 
-    // Store remote connection info
+    // Store remote connection info (with abort handles for all tasks)
     {
         let mut remote = state.remote.write().await;
         *remote = Some(RemoteConnection {
@@ -243,6 +243,11 @@ pub async fn connect_to_remote(
             root_dir: "/".to_string(),
             tx: request_tx.clone(),
             frame_tx: frame_tx.clone(),
+            task_handles: vec![
+                request_handle.abort_handle(),
+                write_handle.abort_handle(),
+                read_handle.abort_handle(),
+            ],
         });
     }
     let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: true });
@@ -262,8 +267,8 @@ pub async fn connect_to_remote(
     }
 
     tokio::select! {
-        _ = write_task => {},
-        _ = read_task => {},
+        _ = write_handle => {},
+        _ = read_handle => {},
     }
 
     {

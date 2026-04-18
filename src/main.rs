@@ -40,9 +40,9 @@ struct Cli {
 enum Commands {
     /// Start the drift server with web UI
     Serve {
-        /// Port to run the server on
+        /// Port to run the server on (default: random free port)
         #[arg(long)]
-        port: u16,
+        port: Option<u16>,
         /// Remote target to connect to (e.g. 192.168.0.2:8000)
         #[arg(long)]
         target: Option<String>,
@@ -117,17 +117,12 @@ async fn main() -> anyhow::Result<()> {
                 return client::send::send_file(target, file_path, &cli.password).await;
             }
 
-            let port = cli.port
-                .ok_or_else(|| anyhow::anyhow!(
-                    "--port is required (or use a subcommand: serve, send, ls, pull)"
-                ))?;
-
-            run_server(port, cli.target, cli.password).await
+            run_server(cli.port, cli.target, cli.password).await
         }
     }
 }
 
-async fn run_server(port: u16, target: Option<String>, password: Option<String>) -> anyhow::Result<()> {
+async fn run_server(port: Option<u16>, target: Option<String>, password: Option<String>) -> anyhow::Result<()> {
     let config = AppConfig {
         target: target.clone(),
         password: password.clone(),

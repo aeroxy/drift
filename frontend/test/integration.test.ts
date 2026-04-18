@@ -429,6 +429,131 @@ describe('drift integration', () => {
   }, 60_000);
 });
 
+// ── Dynamic port + connection management tests ────────────────────────────────
+
+describe('drift dynamic port and connection management', () => {
+  let serverA: DriftProcess;
+  let serverB: DriftProcess;
+
+  beforeAll(async () => {
+    if (!fs.existsSync(TEST_RESOURCES)) {
+      throw new Error('test-resources/ not found. See frontend/test/README.md.');
+    }
+  });
+
+  afterAll(async () => {
+    await Promise.all([serverA?.stop(), serverB?.stop()]);
+  }, 15_000);
+
+  it('starts on a dynamic port when --port is omitted', async () => {
+    serverA = new DriftProcess({ cwd: path.join(TEST_RESOURCES, 'host') });
+    await serverA.start();
+
+    expect(serverA.port, 'port should be assigned by OS (> 0)').toBeGreaterThan(0);
+
+    const res = await fetch(`${serverA.baseUrl}/api/info`);
+    expect(res.ok, '/api/info should be reachable on dynamic port').toBe(true);
+    const info = await res.json();
+    expect(info).toHaveProperty('hostname');
+  }, 20_000);
+
+  it('connects to a remote via POST /api/connect', async () => {
+    // Start serverB (no --target so it starts standalone)
+    serverB = new DriftProcess({ cwd: path.join(TEST_RESOURCES, 'client') });
+    await serverB.start();
+
+    // Connect serverB → serverA via the REST API
+    const res = await fetch(`${serverB.baseUrl}/api/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: `127.0.0.1:${serverA.port}` }),
+    });
+    expect(res.ok, 'POST /api/connect should return 200').toBe(true);
+    const data = await res.json();
+    expect(data.success, 'connect should succeed').toBe(true);
+    expect(typeof data.fingerprint, 'fingerprint should be a string').toBe('string');
+    expect(data.fingerprint).toHaveLength(6);
+
+    // /api/info should now show has_remote: true
+    const info = await fetch(`${serverB.baseUrl}/api/info`).then((r) => r.json());
+    expect(info.has_remote, 'has_remote should be true after connecting').toBe(true);
+
+    // Should be able to browse the remote (serverA) via serverB's WebSocket
+    const ws = await WsBrowserClient.connect(serverB.wsUrl);
+    try {
+      const browsePromise = ws.waitForMessage((msg) => msg.type === 'BrowseResponse', 10_000);
+      ws.send({ type: 'BrowseRequest', path: '.' });
+      const msg = await browsePromise;
+      expect(msg.type).toBe('BrowseResponse');
+    } finally {
+      ws.close();
+    }
+  }, 30_000);
+
+  it('disconnects from remote via POST /api/disconnect', async () => {
+    // serverB should currently be connected to serverA (from previous test)
+    const infoBeforeRes = await fetch(`${serverB.baseUrl}/api/info`);
+    const infoBefore = await infoBeforeRes.json();
+    expect(infoBefore.has_remote, 'should be connected before disconnect').toBe(true);
+
+    // Subscribe to WS before disconnecting to catch the ConnectionStatus event
+    const ws = await WsBrowserClient.connect(serverB.wsUrl);
+    const statusPromise = ws.waitForMessage(
+      (msg) => msg.type === 'ConnectionStatus',
+      10_000,
+    );
+
+    const res = await fetch(`${serverB.baseUrl}/api/disconnect`, { method: 'POST' });
+    expect(res.ok, 'POST /api/disconnect should return 200').toBe(true);
+    const data = await res.json();
+    expect(data.success, 'disconnect should succeed').toBe(true);
+
+    // Should receive ConnectionStatus { has_remote: false } over WebSocket
+    const statusMsg = await statusPromise;
+    expect(statusMsg.type).toBe('ConnectionStatus');
+    if (statusMsg.type === 'ConnectionStatus') {
+      expect(statusMsg.has_remote).toBe(false);
+    }
+    ws.close();
+
+    // /api/info should confirm disconnected state
+    const infoAfter = await fetch(`${serverB.baseUrl}/api/info`).then((r) => r.json());
+    expect(infoAfter.has_remote, 'has_remote should be false after disconnect').toBe(false);
+  }, 20_000);
+
+  it('can switch connections by calling /api/connect again', async () => {
+    // Start a third server to switch to
+    const serverC = new DriftProcess({ cwd: path.join(TEST_RESOURCES, 'host') });
+    await serverC.start();
+
+    try {
+      // Connect serverB → serverA
+      const res1 = await fetch(`${serverB.baseUrl}/api/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: `127.0.0.1:${serverA.port}` }),
+      });
+      const data1 = await res1.json();
+      expect(data1.success, 'first connect should succeed').toBe(true);
+
+      // Immediately reconnect serverB → serverC (switches connection)
+      const res2 = await fetch(`${serverB.baseUrl}/api/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: `127.0.0.1:${serverC.port}` }),
+      });
+      const data2 = await res2.json();
+      expect(data2.success, 'second connect (switch) should succeed').toBe(true);
+
+      // serverB should now have a remote connection
+      const info = await fetch(`${serverB.baseUrl}/api/info`).then((r) => r.json());
+      expect(info.has_remote, 'has_remote should be true after switch').toBe(true);
+    } finally {
+      await serverC.stop();
+    }
+  }, 30_000);
+});
+
 describe('password authentication', () => {
   const hostDir = path.join(TEST_RESOURCES, 'host');
   let hostPort: number;

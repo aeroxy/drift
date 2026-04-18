@@ -128,7 +128,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
         // Request handler: routes browser API requests to remote, tracks pending responses
         let frame_tx_request = frame_tx.clone();
-        tokio::spawn(async move {
+        let request_handle = tokio::spawn(async move {
             while let Some((msg, response_tx)) = request_rx.recv().await {
                 let id = Uuid::new_v4();
                 pending_request.lock().await.insert(id, response_tx);
@@ -138,7 +138,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         });
 
         // Write task: encrypt each frame, send as binary WS frame
-        let write_task = tokio::spawn(async move {
+        let write_handle = tokio::spawn(async move {
             while let Some(frame) = frame_rx.recv().await {
                 match crypto_write.encrypt(&frame) {
                     Ok(ciphertext) => {
@@ -154,37 +154,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             }
         });
 
-        // Store remote connection
-        {
-            let mut remote = state.remote.write().await;
-            *remote = Some(RemoteConnection {
-                hostname: "remote".to_string(),
-                root_dir: "/".to_string(),
-                tx: request_tx.clone(),
-                frame_tx: frame_tx.clone(),
-            });
-        }
-        let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: true });
-
-        // Send InfoRequest to get client's hostname and root_dir
-        let (info_tx, info_rx) = tokio::sync::oneshot::channel();
-        if request_tx.send((ControlMessage::InfoRequest, info_tx)).is_ok() {
-            let state_clone = state.clone();
-            tokio::spawn(async move {
-                if let Ok(Ok(ControlMessage::InfoResponse { hostname, root_dir })) =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await
-                {
-                    let mut remote = state_clone.remote.write().await;
-                    if let Some(ref mut remote_conn) = *remote {
-                        remote_conn.hostname = hostname;
-                        remote_conn.root_dir = root_dir;
-                    }
-                }
-            });
-        }
-
         // Read task: decrypt each binary frame, dispatch by type byte
-        let read_task = tokio::spawn(async move {
+        let read_handle = tokio::spawn(async move {
             while let Some(Ok(msg)) = receiver.next().await {
                 match msg {
                     Message::Binary(encrypted_data) => {
@@ -289,9 +260,43 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             }
         });
 
+        // Store remote connection (with abort handles for all tasks)
+        {
+            let mut remote = state.remote.write().await;
+            *remote = Some(RemoteConnection {
+                hostname: "remote".to_string(),
+                root_dir: "/".to_string(),
+                tx: request_tx.clone(),
+                frame_tx: frame_tx.clone(),
+                task_handles: vec![
+                    request_handle.abort_handle(),
+                    write_handle.abort_handle(),
+                    read_handle.abort_handle(),
+                ],
+            });
+        }
+        let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: true });
+
+        // Send InfoRequest to get client's hostname and root_dir
+        let (info_tx, info_rx) = tokio::sync::oneshot::channel();
+        if request_tx.send((ControlMessage::InfoRequest, info_tx)).is_ok() {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(ControlMessage::InfoResponse { hostname, root_dir })) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await
+                {
+                    let mut remote = state_clone.remote.write().await;
+                    if let Some(ref mut remote_conn) = *remote {
+                        remote_conn.hostname = hostname;
+                        remote_conn.root_dir = root_dir;
+                    }
+                }
+            });
+        }
+
         tokio::select! {
-            _ = write_task => {},
-            _ = read_task => {},
+            _ = write_handle => {},
+            _ = read_handle => {},
         }
 
         {
@@ -322,8 +327,20 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         handle_browser_message(state.clone(), control_msg, outgoing_tx.clone()).await;
     }
 
-    // Subscribe to broadcast events and forward to this browser
+    // Subscribe to broadcast events and forward to this browser.
+    // Subscribe BEFORE pushing current status so we don't miss events that fire
+    // between the status push and the subscription.
     let mut event_rx = state.browser_events.subscribe();
+
+    // Push current connection status immediately so browsers that connect while
+    // a remote is already established (--target at startup, or after /api/connect)
+    // don't have to wait for the next state-change event to show the remote panel.
+    {
+        let has_remote = state.remote.read().await.is_some();
+        let status = ControlMessage::ConnectionStatus { has_remote };
+        let json = serde_json::to_string(&status).unwrap();
+        let _ = outgoing_tx.send(Message::Text(json.into()));
+    }
     let outgoing_for_events = outgoing_tx.clone();
     let event_task = tokio::spawn(async move {
         while let Ok(msg) = event_rx.recv().await {

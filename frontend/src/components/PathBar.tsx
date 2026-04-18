@@ -11,29 +11,28 @@ interface PathBarProps {
 }
 
 export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions }: PathBarProps) {
-  const [editing, setEditing] = useState(false);
-  const [inputValue, setInputValue] = useState("");
+  const [inputValue, setInputValue] = useState(cwd);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [focused, setFocused] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const inputRef = useRef<HTMLInputElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
 
-  const cancelEdit = useCallback(() => {
-    setEditing(false);
+  // Sync input with cwd when not focused (folder clicks, navigation)
+  useEffect(() => {
+    if (!focused) setInputValue(cwd);
+  }, [cwd, focused]);
+
+  const reset = useCallback(() => {
+    setInputValue(cwd);
     setSuggestions([]);
     setActiveIndex(-1);
     clearTimeout(debounceRef.current);
-  }, []);
+  }, [cwd]);
 
-  // Focus input when entering edit mode
+  // Debounced autocomplete fetch (200ms) — only while focused
   useEffect(() => {
-    if (editing) inputRef.current?.focus();
-  }, [editing]);
-
-  // Debounced autocomplete fetch (200ms)
-  useEffect(() => {
-    if (!fetchSuggestions || !inputValue) {
+    if (!focused || !fetchSuggestions || !inputValue) {
       setSuggestions([]);
       return;
     }
@@ -44,27 +43,16 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
       setActiveIndex(-1);
     }, 200);
     return () => clearTimeout(debounceRef.current);
-  }, [inputValue, fetchSuggestions]);
-
-  // Click-outside to cancel
-  useEffect(() => {
-    if (!editing) return;
-    const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        cancelEdit();
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [editing, cancelEdit]);
+  }, [inputValue, fetchSuggestions, focused]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
       onNavigateTo(activeIndex >= 0 ? suggestions[activeIndex] : inputValue);
-      cancelEdit();
+      inputRef.current?.blur();
     } else if (e.key === "Escape") {
-      cancelEdit();
+      reset();
+      inputRef.current?.blur();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIndex((i) => Math.min(i + 1, suggestions.length - 1));
@@ -84,46 +72,37 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
       <Monitor className="w-4 h-4 text-zinc-400 shrink-0" />
       <span className="font-semibold text-emerald-400">{hostname}</span>
       <span className="text-zinc-500">:</span>
-      {editing ? (
-        <div ref={containerRef} className="relative flex-1 min-w-0">
-          <input
-            ref={inputRef}
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            className="w-full bg-zinc-900 border border-zinc-600 rounded px-2 py-0.5 font-mono text-xs text-zinc-100 focus:outline-none focus:border-emerald-400"
-          />
-          {suggestions.length > 0 && (
-            <ul className="absolute top-full left-0 right-0 z-50 mt-0.5 max-h-48 overflow-y-auto bg-zinc-900 border border-zinc-700 rounded shadow-xl">
-              {suggestions.map((s, i) => (
-                <li
-                  key={s}
-                  className={`px-3 py-1.5 font-mono text-xs cursor-pointer truncate ${
-                    i === activeIndex
-                      ? "bg-emerald-500/20 text-emerald-300"
-                      : "text-zinc-300 hover:bg-zinc-800"
-                  }`}
-                  onMouseDown={(e) => {
-                    e.preventDefault(); // prevent input blur before click registers
-                    onNavigateTo(s);
-                    cancelEdit();
-                  }}
-                >
-                  {s}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ) : (
-        <span
-          onClick={() => { setEditing(true); setInputValue(cwd); }}
-          className="text-zinc-300 truncate font-mono text-xs cursor-text hover:text-white transition-colors"
-          title="Click to type a path"
-        >
-          {cwd}
-        </span>
-      )}
+      <div className="relative flex-1 min-w-0">
+        <input
+          ref={inputRef}
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onFocus={(e) => { setFocused(true); e.target.select(); }}
+          onBlur={() => { setFocused(false); reset(); }}
+          className="w-full bg-transparent border border-transparent rounded px-2 py-0.5 font-mono text-xs text-zinc-300 focus:outline-none focus:border-zinc-600 focus:bg-zinc-900 focus:text-zinc-100 transition-colors"
+        />
+        {suggestions.length > 0 && focused && (
+          <ul className="absolute top-full left-0 right-0 z-50 mt-0.5 max-h-48 overflow-y-auto bg-zinc-900 border border-zinc-700 rounded shadow-xl">
+            {suggestions.map((s, i) => (
+              <li
+                key={s}
+                className={`px-3 py-1.5 font-mono text-xs cursor-pointer truncate ${
+                  i === activeIndex
+                    ? "bg-emerald-500/20 text-emerald-300"
+                    : "text-zinc-300 hover:bg-zinc-800"
+                }`}
+                onMouseDown={(e) => {
+                  e.preventDefault(); // prevent input blur before click registers
+                  onNavigateTo(s);
+                }}
+              >
+                {s}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
       <button
         onClick={onRefresh}
         className="ml-auto p-1 hover:bg-zinc-700/50 rounded transition-colors"

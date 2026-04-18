@@ -1,7 +1,11 @@
 [package]
 name = "drift"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
+description = "Encrypted bidirectional file transfer over WebSocket with an embedded web UI"
+authors = ["Aero <aero.windwalker@gmail.com>"]
+repository = "https://github.com/aeroxy/drift"
+license = "MIT"
 
 [dependencies]
 # Async runtime

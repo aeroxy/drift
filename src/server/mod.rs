@@ -47,6 +47,9 @@ pub struct RemoteConnection {
     /// Unified outbound: send pre-encoded frames via `encode_data_frame` or
     /// `encode_control_frame` from `crate::protocol::codec`.
     pub frame_tx: FrameChannel,
+    /// Abort handles for all tasks driving this connection (read, write, request handler).
+    /// Aborting these cleanly tears down the connection from either side.
+    pub task_handles: Vec<tokio::task::AbortHandle>,
 }
 
 impl AppState {
@@ -64,29 +67,48 @@ impl AppState {
     }
 }
 
-pub async fn run(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
+/// Tear down the current remote connection (if any) from either side.
+/// Aborts all read/write tasks, clears state, and broadcasts ConnectionStatus false.
+pub async fn disconnect_remote(state: &AppState) {
+    let connection = {
+        let mut remote = state.remote.write().await;
+        remote.take()
+    };
+    if let Some(conn) = connection {
+        for handle in conn.task_handles {
+            handle.abort();
+        }
+    }
+    *state.fingerprint.write().await = None;
+    let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: false });
+}
+
+pub async fn run(state: Arc<AppState>, port: Option<u16>) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/browse", get(file_api::browse))
         .route("/api/info", get(file_api::info))
+        .route("/api/connect", axum::routing::post(file_api::connect))
+        .route("/api/disconnect", axum::routing::post(file_api::disconnect))
         .route("/ws", get(ws_handler::ws_upgrade))
         .fallback(static_handler)
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port.unwrap_or(0)));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let actual_port = listener.local_addr()?.port();
 
     let local_ips = get_local_ip_addresses();
     if local_ips.is_empty() {
-        tracing::info!("drift server listening on http://localhost:{}", port);
+        tracing::info!("drift server listening on http://localhost:{}", actual_port);
     } else {
         tracing::info!("drift server listening on:");
-        tracing::info!("  http://localhost:{}", port);
+        tracing::info!("  http://localhost:{}", actual_port);
         for ip in local_ips {
-            tracing::info!("  http://{}:{}", ip, port);
+            tracing::info!("  http://{}:{}", ip, actual_port);
         }
     }
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())

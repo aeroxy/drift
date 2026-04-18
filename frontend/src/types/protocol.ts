@@ -26,6 +26,17 @@ export interface InfoResponse {
   fingerprint: string | null;
 }
 
+export interface ConnectRequest {
+  target: string;
+  password?: string;
+}
+
+export interface ConnectResponse {
+  success: boolean;
+  error?: string;
+  fingerprint?: string;
+}
+
 export interface TransferProgress {
   id: string;
   path: string;

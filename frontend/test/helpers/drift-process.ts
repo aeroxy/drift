@@ -6,32 +6,37 @@ const PROJECT_ROOT = path.resolve(import.meta.dirname, '../../../');
 const BINARY = path.join(PROJECT_ROOT, 'target/debug/drift');
 
 interface DriftProcessOptions {
-  port: number;
+  port?: number;
   cwd: string;
   target?: string;
   password?: string;
 }
 
 export class DriftProcess {
-  readonly port: number;
+  private _port: number;
   readonly cwd: string;
   readonly target?: string;
   readonly password?: string;
   private proc: ChildProcess | null = null;
 
   constructor(opts: DriftProcessOptions) {
-    this.port = opts.port;
+    this._port = opts.port ?? 0;
     this.cwd = opts.cwd;
     this.target = opts.target;
     this.password = opts.password;
   }
 
+  /** Actual port (available after start() resolves). */
+  get port(): number {
+    return this._port;
+  }
+
   get baseUrl() {
-    return `http://127.0.0.1:${this.port}`;
+    return `http://127.0.0.1:${this._port}`;
   }
 
   get wsUrl() {
-    return `ws://127.0.0.1:${this.port}/ws`;
+    return `ws://127.0.0.1:${this._port}/ws`;
   }
 
   start(): Promise<void> {
@@ -41,7 +46,10 @@ export class DriftProcess {
         return;
       }
 
-      const args = ['serve', '--port', String(this.port)];
+      const args = ['serve'];
+      if (this._port !== 0) {
+        args.push('--port', String(this._port));
+      }
       if (this.target) {
         args.push('--target', this.target);
       }
@@ -56,12 +64,15 @@ export class DriftProcess {
       });
 
       const timeout = setTimeout(() => {
-        reject(new Error(`drift process (port ${this.port}) failed to start within 15s`));
+        reject(new Error(`drift process (port ${this._port}) failed to start within 15s`));
       }, 15_000);
 
       const onData = (data: Buffer) => {
         const text = data.toString();
-        if (text.includes('drift server listening on')) {
+        // Parse the actual port from log: "drift server listening on http://localhost:PORT"
+        const match = text.match(/listening on http:\/\/localhost:(\d+)/);
+        if (match) {
+          this._port = parseInt(match[1], 10);
           clearTimeout(timeout);
           resolve();
         }
@@ -78,7 +89,7 @@ export class DriftProcess {
       this.proc.on('exit', (code) => {
         if (code !== null && code !== 0) {
           clearTimeout(timeout);
-          reject(new Error(`drift process (port ${this.port}) exited with code ${code}`));
+          reject(new Error(`drift process (port ${this._port}) exited with code ${code}`));
         }
       });
     });
