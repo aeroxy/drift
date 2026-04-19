@@ -1,4 +1,7 @@
-.PHONY: build check run dev test clean bump-patch bump-minor bump-major update-formula
+.PHONY: build check run dev test clean bump-patch bump-minor bump-major update-formula release-linux release-all
+
+LINUX_TARGET = x86_64-unknown-linux-gnu
+LINUX_OUT    = target/$(LINUX_TARGET)/release
 
 PORT ?= 8000
 TARGET ?=
@@ -13,6 +16,19 @@ release:
 	cd frontend && bun run build
 	cargo build --release
 
+## Build release binary for Linux x86_64 using Zig cross-compiler
+release-linux:
+	cd frontend && bun run build
+	cargo zigbuild --release --target $(LINUX_TARGET)
+	@echo ""
+	@echo "Linux x86_64 release binary:"
+	@ls -lh $(LINUX_OUT)/drift
+
+## Build release binaries for macOS (native) and Linux x86_64 (zigbuild)
+release-all: release release-linux
+	@echo ""
+	@echo "All platform binaries built."
+
 ## Type-check without producing a binary
 check:
 	cargo check
@@ -22,7 +38,7 @@ check:
 ##   make run PORT=9000
 ##   make run PORT=9000 TARGET=192.168.0.2:8000
 run:
-	cargo run -- serve --port $(PORT) $(if $(TARGET),--target $(TARGET),)
+	cargo run -- --port $(PORT) $(if $(TARGET),--target $(TARGET),)
 
 ## Start the frontend dev server (hot reload, proxies to Rust backend)
 dev:

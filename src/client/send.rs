@@ -20,6 +20,7 @@ pub async fn send_file(
     target: &str,
     file_path: &Path,
     password: &Option<String>,
+    allow_insecure_tls: bool,
 ) -> anyhow::Result<()> {
     let file_path = file_path.canonicalize()?;
     let file_name = file_path
@@ -42,10 +43,7 @@ pub async fn send_file(
         (file_path.clone(), metadata.len(), None)
     };
 
-    let url = format!("ws://{}/ws", target);
-    tracing::info!("Connecting to {}", url);
-
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (ws_stream, _) = super::open_ws(target, allow_insecure_tls).await?;
     tracing::info!("Connected");
 
     let (mut ws_write, mut ws_read) = ws_stream.split();

@@ -6,4 +6,6 @@ pub struct AppConfig {
     pub password: Option<String>,
     pub root_dir: PathBuf,
     pub hostname: String,
+    pub allow_insecure_tls: bool,
+    pub disable_ui: bool,
 }

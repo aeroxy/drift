@@ -47,11 +47,21 @@ cd frontend && bun run build && cd ..
 cargo build
 
 # Run without a port (OS picks a free port and logs it)
-cargo run -- serve
+cargo run
 
 # Run server
-cargo run -- serve --port 8000
-cargo run -- serve --port 8000 --target 192.168.0.2:8000 --password secret
+cargo run -- --port 8000
+cargo run -- --port 8000 --target 192.168.0.2:8000 --password secret
+
+# Run in background (logs → ./drift.log)
+cargo run -- --port 8000 --daemon
+
+# Expose only /ws (no UI/REST), useful behind a reverse proxy
+cargo run -- --port 8000 --disable-ui
+
+# Connect to a wss:// target (TLS-terminating reverse proxy)
+cargo run -- --port 8000 --target wss://example.com/drift
+cargo run -- ls --target wss://example.com/drift --allow-insecure-tls
 
 # List files on a remote host
 cargo run -- ls --target 192.168.0.2:8000 [path]
@@ -62,8 +72,7 @@ cargo run -- pull --target 192.168.0.2:8000 <remote-path> [--output dir]
 # Send a file directly (no web UI)
 cargo run -- send --target 192.168.0.2:8000 test.mp4
 
-# Legacy flat args still work:
-cargo run -- --port 8000
+# Legacy --file flat arg still works:
 cargo run -- --target 192.168.0.2:8000 --file test.mp4
 
 # Frontend dev (hot reload, proxies API/WS to Rust backend)

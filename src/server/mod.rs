@@ -84,19 +84,25 @@ pub async fn disconnect_remote(state: &AppState) {
 }
 
 pub async fn run(state: Arc<AppState>, port: Option<u16>) -> anyhow::Result<()> {
-    let app = Router::new()
-        .route("/api/browse", get(file_api::browse))
-        .route("/api/info", get(file_api::info))
-        .route("/api/connect", axum::routing::post(file_api::connect))
-        .route("/api/disconnect", axum::routing::post(file_api::disconnect))
-        .route("/ws", get(ws_handler::ws_upgrade))
-        .fallback(static_handler)
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+    let disable_ui = state.config.disable_ui;
+    let mut app = Router::new().route("/ws", get(ws_handler::ws_upgrade));
+    if !disable_ui {
+        app = app
+            .route("/api/browse", get(file_api::browse))
+            .route("/api/info", get(file_api::info))
+            .route("/api/connect", axum::routing::post(file_api::connect))
+            .route("/api/disconnect", axum::routing::post(file_api::disconnect))
+            .fallback(static_handler);
+    }
+    let app = app.layer(CorsLayer::permissive()).with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port.unwrap_or(0)));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_port = listener.local_addr()?.port();
+
+    if disable_ui {
+        tracing::info!("UI disabled — only /ws is exposed");
+    }
 
     let local_ips = get_local_ip_addresses();
     if local_ips.is_empty() {

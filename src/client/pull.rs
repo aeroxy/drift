@@ -17,11 +17,9 @@ pub async fn pull_remote(
     remote_path: &str,
     output_dir: Option<&Path>,
     password: &Option<String>,
+    allow_insecure_tls: bool,
 ) -> anyhow::Result<()> {
-    let url = format!("ws://{}/ws", target);
-    tracing::info!("Connecting to {}", url);
-
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (ws_stream, _) = super::open_ws(target, allow_insecure_tls).await?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
     let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;

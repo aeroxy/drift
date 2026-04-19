@@ -50,7 +50,10 @@ cargo build --release
 
 ```bash
 # Serve on port 8000, browsing the current directory
-drift serve --port 8000
+drift --port 8000
+
+# Run in the background (logs → ./drift.log)
+drift --port 8000 --daemon
 ```
 
 Visit `http://localhost:8000` to see the file browser.
@@ -59,10 +62,10 @@ Visit `http://localhost:8000` to see the file browser.
 
 ```bash
 # Machine A (server)
-drift serve --port 8000
+drift --port 8000
 
 # Machine B (connects to A)
-drift serve --port 9000 --target 192.168.0.2:8000
+drift --port 9000 --target 192.168.0.2:8000
 ```
 
 Both machines now show a two-pane UI. Select files on either side and copy them across. Both `localhost:8000` and `localhost:9000` show each other's files.

@@ -5,6 +5,134 @@ pub mod send;
 
 use std::sync::Arc;
 use std::collections::HashMap;
+
+// ── WebSocket connection helpers ───────────────────────────────────────────────
+
+/// Build the ws:// or wss:// URL from a user-supplied target string.
+/// The path the user supplies is treated as a base prefix; `/ws` is appended
+/// unless it's already there. Bare `host:port` defaults to `ws://` (back-compat).
+pub(crate) fn build_ws_url(target: &str) -> String {
+    let with_scheme = if target.starts_with("ws://") || target.starts_with("wss://") {
+        target.to_string()
+    } else {
+        format!("ws://{}", target)
+    };
+    let trimmed = with_scheme.trim_end_matches('/').to_string();
+    if trimmed.ends_with("/ws") { trimmed } else { format!("{}/ws", trimmed) }
+}
+
+/// Connect, applying TLS settings if the URL uses wss://.
+pub(crate) async fn open_ws(
+    target: &str,
+    allow_insecure_tls: bool,
+) -> anyhow::Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    let url = build_ws_url(target);
+    tracing::info!("Connecting to {}", url);
+    if url.starts_with("wss://") {
+        // Always build our own connector for wss:// so we can force ALPN to http/1.1.
+        // Without this, TLS negotiates HTTP/2 and WebSocket upgrade hangs.
+        let connector = if allow_insecure_tls {
+            build_insecure_rustls_connector()?
+        } else {
+            build_secure_rustls_connector()?
+        };
+        Ok(tokio_tungstenite::connect_async_tls_with_config(&url, None, true, Some(connector)).await?)
+    } else {
+        Ok(tokio_tungstenite::connect_async(&url).await?)
+    }
+}
+
+/// rustls ClientConfig with native root certs and http/1.1 ALPN (required for WebSocket over TLS).
+fn build_secure_rustls_connector() -> anyhow::Result<tokio_tungstenite::Connector> {
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in rustls_native_certs::load_native_certs().certs {
+        root_store.add(cert).ok();
+    }
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+}
+
+/// rustls ClientConfig with certificate verification disabled (for self-signed certs).
+fn build_insecure_rustls_connector() -> anyhow::Result<tokio_tungstenite::Connector> {
+    tracing::warn!("TLS certificate verification DISABLED (--allow-insecure-tls)");
+    let mut config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerifier))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+}
+
+#[derive(Debug)]
+struct NoCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls_pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
+        _server_name: &rustls_pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::ED448,
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_ws_url;
+
+    #[test]
+    fn test_build_ws_url() {
+        assert_eq!(build_ws_url("192.168.0.2:8000"), "ws://192.168.0.2:8000/ws");
+        assert_eq!(build_ws_url("ws://192.168.0.2:8000"), "ws://192.168.0.2:8000/ws");
+        assert_eq!(build_ws_url("wss://example.com"), "wss://example.com/ws");
+        assert_eq!(build_ws_url("wss://example.com/"), "wss://example.com/ws");
+        assert_eq!(build_ws_url("wss://example.com/drift"), "wss://example.com/drift/ws");
+        assert_eq!(build_ws_url("wss://example.com/drift/ws"), "wss://example.com/drift/ws");
+    }
+}
 use crate::crypto::{handshake::{KeyPair, decode_public_key, derive_shared_secret}, stream::CryptoStream};
 use crate::protocol::messages::ControlMessage;
 use crate::protocol::codec::{
@@ -72,12 +200,10 @@ pub(crate) async fn recv_encrypted_frame(
 pub async fn connect_to_remote(
     target: &str,
     password: &Option<String>,
+    allow_insecure_tls: bool,
     state: Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let url = format!("ws://{}/ws", target);
-    tracing::info!("Connecting to remote: {}", url);
-
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (ws_stream, _) = open_ws(target, allow_insecure_tls).await?;
     tracing::info!("Connected to remote: {}", target);
 
     let (mut ws_write, mut ws_read) = ws_stream.split();

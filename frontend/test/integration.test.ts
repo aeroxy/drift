@@ -614,3 +614,76 @@ describe('password authentication', () => {
     }).rejects.toThrow();
   }, 30_000);
 });
+
+describe('--disable-ui flag', () => {
+  const hostDir = TEST_RESOURCES;
+  let hostProc: DriftProcess;
+
+  afterAll(async () => {
+    await hostProc?.stop();
+  });
+
+  it('hides REST API and frontend when --disable-ui is set', async () => {
+    hostProc = new DriftProcess({ cwd: hostDir, disableUi: true });
+    await hostProc.start();
+
+    const [browseRes, infoRes, rootRes] = await Promise.all([
+      fetch(`${hostProc.baseUrl}/api/browse`),
+      fetch(`${hostProc.baseUrl}/api/info`),
+      fetch(`${hostProc.baseUrl}/`),
+    ]);
+
+    expect(browseRes.status).toBe(404);
+    expect(infoRes.status).toBe(404);
+    expect(rootRes.status).toBe(404);
+  }, 30_000);
+
+  it('still accepts WebSocket connections on /ws when --disable-ui is set', async () => {
+    // hostProc is still running from previous test
+    const output = runDriftCli(
+      ['ls', '--target', `127.0.0.1:${hostProc.port}`, '.'],
+      { cwd: hostDir },
+    );
+    expect(output).toContain(':');
+  }, 30_000);
+
+  it('--allow-insecure-tls and --disable-ui flags are accepted by the root command and subcommands', () => {
+    const helpRoot = runDriftCli(['--help']);
+    const helpSend = runDriftCli(['send', '--help']);
+    const helpLs   = runDriftCli(['ls', '--help']);
+    const helpPull  = runDriftCli(['pull', '--help']);
+
+    expect(helpRoot).toContain('allow-insecure-tls');
+    expect(helpRoot).toContain('disable-ui');
+    expect(helpRoot).toContain('daemon');
+    for (const help of [helpSend, helpLs, helpPull]) {
+      expect(help).toContain('allow-insecure-tls');
+    }
+  }, 15_000);
+
+  it('--daemon starts server in background and writes to drift.log', async () => {
+    const tmpDir = fs.mkdtempSync('/tmp/drift-daemon-test-');
+    try {
+      const result = runDriftCli(['--daemon'], { cwd: tmpDir });
+      expect(result).toContain('PID:');
+      expect(result).toContain('drift.log');
+
+      // Give daemon time to start and write its port line
+      await new Promise((r) => setTimeout(r, 1_500));
+
+      const logContent = fs.readFileSync(path.join(tmpDir, 'drift.log'), 'utf-8');
+      const portMatch = logContent.match(/localhost:(\d+)/);
+      expect(portMatch).not.toBeNull();
+
+      const port = parseInt(portMatch![1], 10);
+      const res = await fetch(`http://127.0.0.1:${port}/api/info`);
+      expect(res.status).toBe(200);
+
+      // Extract PID and kill daemon
+      const pidMatch = result.match(/PID: (\d+)/);
+      if (pidMatch) process.kill(parseInt(pidMatch[1], 10));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+});

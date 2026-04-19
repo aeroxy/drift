@@ -10,6 +10,7 @@ interface DriftProcessOptions {
   cwd: string;
   target?: string;
   password?: string;
+  disableUi?: boolean;
 }
 
 export class DriftProcess {
@@ -17,6 +18,7 @@ export class DriftProcess {
   readonly cwd: string;
   readonly target?: string;
   readonly password?: string;
+  readonly disableUi: boolean;
   private proc: ChildProcess | null = null;
 
   constructor(opts: DriftProcessOptions) {
@@ -24,6 +26,7 @@ export class DriftProcess {
     this.cwd = opts.cwd;
     this.target = opts.target;
     this.password = opts.password;
+    this.disableUi = opts.disableUi ?? false;
   }
 
   /** Actual port (available after start() resolves). */
@@ -46,7 +49,7 @@ export class DriftProcess {
         return;
       }
 
-      const args = ['serve'];
+      const args: string[] = [];
       if (this._port !== 0) {
         args.push('--port', String(this._port));
       }
@@ -55,6 +58,9 @@ export class DriftProcess {
       }
       if (this.password) {
         args.push('--password', this.password);
+      }
+      if (this.disableUi) {
+        args.push('--disable-ui');
       }
 
       this.proc = spawn(BINARY, args, {

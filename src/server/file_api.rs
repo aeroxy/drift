@@ -95,6 +95,7 @@ pub async fn connect(
 
     let target = params.target.clone();
     let password = params.password.clone();
+    let allow_insecure_tls = state.config.allow_insecure_tls;
     let state_clone = state.clone();
 
     // Channel to receive a connection error (only sent on failure; on success
@@ -102,7 +103,7 @@ pub async fn connect(
     let (err_tx, err_rx) = tokio::sync::oneshot::channel::<String>();
 
     tokio::spawn(async move {
-        if let Err(e) = crate::client::connect_to_remote(&target, &password, state_clone).await {
+        if let Err(e) = crate::client::connect_to_remote(&target, &password, allow_insecure_tls, state_clone).await {
             let _ = err_tx.send(e.to_string());
         }
     });

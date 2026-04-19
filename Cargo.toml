@@ -1,6 +1,6 @@
 [package]
 name = "drift"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "Encrypted bidirectional file transfer over WebSocket with an embedded web UI"
 authors = ["Aero <aero.windwalker@gmail.com>"]
@@ -35,8 +35,11 @@ hkdf = "0.12"
 hmac = "0.12"
 
 # WS client (for --target mode)
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
+rustls = "0.23"
+rustls-pki-types = "1"
+rustls-native-certs = "0.8"
 
 # File system
 walkdir = "2"
