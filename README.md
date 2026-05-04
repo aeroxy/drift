@@ -17,6 +17,9 @@
 
 **drift** is a single binary that lets you securely copy files and folders between two machines over WebSocket. It includes a built-in web UI with a two-pane file browser — no setup, no cloud, no SSH keys.
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/aeroxy/drift)
+
 ## Features
 
 - Single self-contained binary (React frontend embedded)
