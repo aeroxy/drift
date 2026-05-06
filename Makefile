@@ -24,10 +24,17 @@ release-linux:
 	@echo "Linux x86_64 release binary:"
 	@ls -lh $(LINUX_OUT)/drift
 
-## Build release binaries for macOS (native) and Linux x86_64 (zigbuild)
-release-all: release release-linux
+## Build release binaries for macOS (native) and Linux x86_64 (zigbuild), then zip both
+release-all:
+	cd frontend && bun run build
+	cargo build --release
+	cargo zigbuild --release --target $(LINUX_TARGET)
+	zip -j target/release/drift_macos_arm64.zip target/release/drift
+	zip -j $(LINUX_OUT)/drift_linux_x86_64.zip $(LINUX_OUT)/drift
 	@echo ""
-	@echo "All platform binaries built."
+	@echo "All platform zips ready:"
+	@echo "  target/release/drift_macos_arm64.zip"
+	@echo "  $(LINUX_OUT)/drift_linux_x86_64.zip"
 
 ## Type-check without producing a binary
 check:
@@ -85,18 +92,16 @@ bump-major:
 	sed -i '' "s/version \"$$old\"/version \"$$new\"/" Formula/drift.rb; \
 	echo "$$old → $$new"
 
-## Update Formula/drift.rb SHA256 after uploading release zips.
-## Run this once both GitHub release zips are live:
+## Update Formula/drift.rb SHA256 from local release zips (run after release-all, before upload).
 ##   make update-formula
 update-formula:
-	@ver=$$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'); \
-	mac_url="https://github.com/aeroxy/drift/releases/download/$$ver/drift_macos_arm64.zip"; \
-	lin_url="https://github.com/aeroxy/drift/releases/download/$$ver/drift_linux_x86_64.zip"; \
-	echo "Fetching macOS SHA256 …"; \
-	mac_sha=$$(curl -sL "$$mac_url" | shasum -a 256 | cut -d' ' -f1); \
+	@mac_zip="target/release/drift_macos_arm64.zip"; \
+	lin_zip="$(LINUX_OUT)/drift_linux_x86_64.zip"; \
+	echo "Computing macOS SHA256 …"; \
+	mac_sha=$$(shasum -a 256 "$$mac_zip" | cut -d' ' -f1); \
 	echo "macOS SHA256: $$mac_sha"; \
-	echo "Fetching Linux SHA256 …"; \
-	lin_sha=$$(curl -sL "$$lin_url" | shasum -a 256 | cut -d' ' -f1); \
+	echo "Computing Linux SHA256 …"; \
+	lin_sha=$$(shasum -a 256 "$$lin_zip" | cut -d' ' -f1); \
 	echo "Linux SHA256: $$lin_sha"; \
 	sed -i '' "/drift_macos_arm64\.zip/{n; s/sha256 \"[a-f0-9]*\"/sha256 \"$$mac_sha\"/;}" Formula/drift.rb; \
 	sed -i '' "/drift_linux_x86_64\.zip/{n; s/sha256 \"[a-f0-9]*\"/sha256 \"$$lin_sha\"/;}" Formula/drift.rb; \
