@@ -73,10 +73,12 @@ export class DriftProcess {
         reject(new Error(`drift process (port ${this._port}) failed to start within 15s`));
       }, 15_000);
 
+      // Accumulate output across chunks; the multi-line "listening on:\n  http://localhost:PORT"
+      // format means the port line and the marker line may arrive in separate buffers.
+      let buf = '';
       const onData = (data: Buffer) => {
-        const text = data.toString();
-        // Parse the actual port from log: "drift server listening on http://localhost:PORT"
-        const match = text.match(/listening on http:\/\/localhost:(\d+)/);
+        buf += data.toString();
+        const match = buf.match(/http:\/\/localhost:(\d+)/);
         if (match) {
           this._port = parseInt(match[1], 10);
           clearTimeout(timeout);

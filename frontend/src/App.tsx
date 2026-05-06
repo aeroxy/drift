@@ -28,6 +28,8 @@ export default function App() {
   const [hasRemote, setHasRemote] = useState(false);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [remoteHostname, setRemoteHostname] = useState<string | undefined>(undefined);
+  const [canReconnect, setCanReconnect] = useState(false);
+  const [lastTarget, setLastTarget] = useState<string | null>(null);
 
   // Connection modal state
   const [showConnectModal, setShowConnectModal] = useState(false);
@@ -67,6 +69,8 @@ export default function App() {
       const info: InfoResponse = await r.json();
       setHasRemote(info.has_remote);
       setFingerprint(info.fingerprint ?? null);
+      setCanReconnect(info.can_reconnect);
+      setLastTarget(info.last_target);
       if (!info.has_remote) {
         setRemoteEntries([]);
         setRemoteInfo({ hostname: "...", cwd: "..." });
@@ -114,6 +118,26 @@ export default function App() {
     }
   }, []);
 
+  const handleReconnect = useCallback(async () => {
+    setConnecting(true);
+    try {
+      const res = await fetch("/api/reconnect", { method: "POST" });
+      const data: ConnectResponse = await res.json();
+      if (data.success) {
+        setFingerprint(data.fingerprint ?? null);
+        await fetchRemoteStatus();
+      } else {
+        setError(data.error ?? "Reconnect failed");
+        setTimeout(() => setError(null), 5000);
+      }
+    } catch {
+      setError("Network error");
+      setTimeout(() => setError(null), 5000);
+    } finally {
+      setConnecting(false);
+    }
+  }, [fetchRemoteStatus]);
+
   // Initial remote status fetch on mount
   useEffect(() => {
     fetchRemoteStatus();
@@ -142,9 +166,8 @@ export default function App() {
           setRemotePath(".");
           setRemoteSelected(new Set());
           setFingerprint(null);
-        } else {
-          fetchRemoteStatus();
         }
+        fetchRemoteStatus();
         break;
       case "TransferProgress":
         updateProgress(msg);
@@ -378,7 +401,7 @@ export default function App() {
       <header className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/50">
         <div className="flex items-center gap-3">
           <img src="/logo.svg" alt="drift" className="h-6 invert-0 brightness-0 invert" style={{ filter: "brightness(0) invert(1) sepia(1) saturate(5) hue-rotate(120deg)" }} />
-          <span className="text-xs text-zinc-600 font-mono">v0.1.7</span>
+          <span className="text-xs text-zinc-600 font-mono">v0.2.0</span>
         </div>
       </header>
 
@@ -403,6 +426,9 @@ export default function App() {
         onConnect={() => { setConnectError(undefined); setShowConnectModal(true); }}
         onDisconnect={handleDisconnect}
         connecting={connecting}
+        canReconnect={canReconnect}
+        lastTarget={lastTarget}
+        onReconnect={handleReconnect}
       />
 
       {/* Connection modal */}

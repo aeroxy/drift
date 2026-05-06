@@ -24,6 +24,8 @@ export interface InfoResponse {
   root_dir: string;
   has_remote: boolean;
   fingerprint: string | null;
+  can_reconnect: boolean;
+  last_target: string | null;
 }
 
 export interface ConnectRequest {

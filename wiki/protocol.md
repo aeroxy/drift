@@ -91,3 +91,15 @@ decode_data_frame(payload)                   -> (Uuid, u64, &[u8])
 `ControlMessage::is_request()` identifies messages that expect a response. Each side maintains a `HashMap<Uuid, oneshot::Sender<ControlMessage>>` (`pending`) to match responses back to callers.
 
 Requests are sent via `request_tx`, tagged with a generated UUID inserted into `pending`. Responses are matched against the oldest pending entry (FIFO assumption — only one in-flight request at a time per connection).
+
+## REST API
+
+| Endpoint            | Method | Body                              | Notes |
+|---------------------|--------|-----------------------------------|-------|
+| `/api/browse`       | GET    | `?path=`                          | Local file listing |
+| `/api/info`         | GET    | —                                 | `{ hostname, root_dir, has_remote, fingerprint, can_reconnect, last_target }` |
+| `/api/connect`      | POST   | `{ target, password? }`           | Establish a new server-to-server connection |
+| `/api/reconnect`    | POST   | —                                 | Re-establish using credentials remembered from the last successful connect |
+| `/api/disconnect`   | POST   | —                                 | Tear down current connection **and** forget stored credentials |
+
+`can_reconnect` is `true` when there is no live connection but the server still remembers a target (CLI-initiated startup or a prior successful `/api/connect`). The FE renders a "Reconnect" button when this flag is set. `last_target` is the bare target string for display; the password is never returned.

@@ -18,7 +18,7 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
   - `ws_handler.rs` — WebSocket connection handler (browser + server-to-server)
   - `browser_transfer.rs` — Transfer orchestration for browser-initiated transfers; `send_entries()` is shared by push and pull
   - `transfer_receiver.rs` — Incoming file writer + tar.gz decompression; `start_transfer_with_notify()` for pull completion signaling
-  - `file_api.rs` — REST endpoints (/api/browse, /api/info)
+  - `file_api.rs` — REST endpoints (/api/browse, /api/info, /api/connect, /api/reconnect, /api/disconnect). `/api/info` exposes `can_reconnect` + `last_target` so the FE can render a Reconnect button after an unexpected drop.
 - `src/client/` — outbound WS connection to `--target`
   - `mod.rs` — Bidirectional encrypted WS connection; shared types (`WsWrite`, `WsRead`, `DecryptedFrame`) and `recv_encrypted_frame()`
   - `send.rs` — Direct file send mode (connect, transfer, exit); shared helpers `send_encrypted_control()`, `recv_encrypted_control()`, `format_bytes()`
@@ -107,8 +107,13 @@ The `wiki/` directory contains canonical documentation for each feature. **Alway
 
 - Every new feature or CLI command must ship with a corresponding integration test in `frontend/test/integration.test.ts`. If the feature is a one-shot CLI command (like `ls` or `pull`), use `runDriftCli()` from `drift-process.ts` to exercise it against a live server and assert on output or file integrity.
 
-## Dependencies
+## Preparing Release
 
-Rust: axum, tokio, clap, rust-embed, x25519-dalek, chacha20poly1305, serde, tokio-tungstenite, walkdir, uuid, hkdf, sha2, hmac, tar, flate2
-
-Frontend: React 19, TypeScript, Vite, Tailwind CSS v4, lucide-react
+1. Bump the version: `make bump-patch` (or `bump-minor` / `bump-major`)
+2. Build release binaries for all platforms: `make release-all`
+3. Zip the binaries:
+   ```bash
+   zip -j drift_macos_arm64.zip target/release/drift
+   zip -j drift_linux_x86_64.zip target/x86_64-unknown-linux-gnu/release/drift
+   ```
+4. Update `Formula/drift.rb` with the correct SHA256s: `make update-formula`

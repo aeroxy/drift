@@ -32,9 +32,17 @@
 - CLI commands to explore remote hosts (`ls`, `pull`) — no web UI needed
 - Bidirectional — push files to remote **or** pull files from remote
 - Both directions work from the browser UI (left pane = local, right pane = remote)
+- One-click reconnect when the remote drops (works for CLI-launched sessions too)
 - Zero configuration — just run it
 
 ## Install
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap aeroxy/drift https://github.com/aeroxy/drift.git
+brew install drift
+```
 
 ### From source
 

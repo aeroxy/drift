@@ -97,6 +97,12 @@ Connects to a running drift server and downloads the specified file or folder. T
 6. On `TransferComplete`, client finalizes the write and sends `TransferFinalized`
 7. For directories: the received tar.gz archive is extracted and cleaned up
 
+## Reconnecting after a drop
+
+When the server-to-server connection is interrupted (network blip, remote restart), the server keeps the most recent target/password in memory. The web UI shows a **Reconnect** button next to the standard "Connect to remote" link, and `POST /api/reconnect` re-establishes without prompting for credentials.
+
+CLI-initiated targets (`drift --target host:8000`) seed the reconnect slot at startup, so a fresh browser tab can recover a CLI-launched session without ever having seen the credentials. An intentional disconnect (red Unplug button or `POST /api/disconnect`) clears the stored credentials.
+
 ## Target format
 
 All commands accept `--target` in three forms:

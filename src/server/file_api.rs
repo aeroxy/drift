@@ -55,16 +55,27 @@ pub struct InfoResponse {
     pub root_dir: String,
     pub has_remote: bool,
     pub fingerprint: Option<String>,
+    /// True when the BE has a remembered target the FE can reconnect to without
+    /// re-prompting (i.e. a previous connect succeeded and was not torn down via
+    /// `/api/disconnect`).
+    pub can_reconnect: bool,
+    /// The remembered target string (e.g. "192.168.0.2:8000"), shown in the FE
+    /// for context. Never includes the password.
+    pub last_target: Option<String>,
 }
 
 pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
     let has_remote = state.remote.read().await.is_some();
     let fingerprint = state.fingerprint.read().await.clone();
+    let last_target = state.last_target.read().await.clone();
+    let can_reconnect = !has_remote && last_target.is_some();
     Json(InfoResponse {
         hostname: state.config.hostname.clone(),
         root_dir: state.config.root_dir.to_string_lossy().to_string(),
         has_remote,
         fingerprint,
+        can_reconnect,
+        last_target,
     })
 }
 
@@ -87,23 +98,50 @@ pub async fn connect(
     State(state): State<Arc<AppState>>,
     Json(params): Json<ConnectParams>,
 ) -> Json<ConnectResponse> {
-    // Tear down any existing connection first
-    crate::server::disconnect_remote(&state).await;
+    do_connect(state, params.target, params.password).await
+}
+
+pub async fn reconnect(State(state): State<Arc<AppState>>) -> Json<ConnectResponse> {
+    let target = state.last_target.read().await.clone();
+    let password = state.last_password.read().await.clone();
+    match target {
+        Some(t) => do_connect(state, t, password).await,
+        None => Json(ConnectResponse {
+            success: false,
+            error: Some("No previous connection to reconnect to".to_string()),
+            fingerprint: None,
+        }),
+    }
+}
+
+/// Shared connect-and-wait body for `/api/connect` and `/api/reconnect`.
+/// Spawns connect_to_remote() and races a 10s timeout against the success
+/// broadcast and the failure channel. Stored credentials are written by
+/// connect_to_remote() itself on successful handshake.
+async fn do_connect(
+    state: Arc<AppState>,
+    target: String,
+    password: Option<String>,
+) -> Json<ConnectResponse> {
+    // Tear down any existing connection first (keep stored creds — they'll be
+    // overwritten on success, and we want to keep them on failure too so the
+    // user can retry).
+    crate::server::disconnect_remote(&state, false).await;
 
     // Subscribe before spawning so we don't miss the success signal
     let mut event_rx = state.browser_events.subscribe();
 
-    let target = params.target.clone();
-    let password = params.password.clone();
     let allow_insecure_tls = state.config.allow_insecure_tls;
     let state_clone = state.clone();
+    let target_clone = target.clone();
+    let password_clone = password.clone();
 
     // Channel to receive a connection error (only sent on failure; on success
     // connect_to_remote keeps running until the connection closes)
     let (err_tx, err_rx) = tokio::sync::oneshot::channel::<String>();
 
     tokio::spawn(async move {
-        if let Err(e) = crate::client::connect_to_remote(&target, &password, allow_insecure_tls, state_clone).await {
+        if let Err(e) = crate::client::connect_to_remote(&target_clone, &password_clone, allow_insecure_tls, state_clone).await {
             let _ = err_tx.send(e.to_string());
         }
     });
@@ -139,7 +177,7 @@ pub async fn connect(
             Json(ConnectResponse { success: false, error: Some(e), fingerprint: None })
         }
         Err(_) => {
-            crate::server::disconnect_remote(&state).await;
+            crate::server::disconnect_remote(&state, false).await;
             Json(ConnectResponse {
                 success: false,
                 error: Some("Connection timed out".to_string()),
@@ -150,6 +188,6 @@ pub async fn connect(
 }
 
 pub async fn disconnect(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    crate::server::disconnect_remote(&state).await;
+    crate::server::disconnect_remote(&state, true).await;
     Json(serde_json::json!({ "success": true }))
 }

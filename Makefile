@@ -85,14 +85,19 @@ bump-major:
 	sed -i '' "s/version \"$$old\"/version \"$$new\"/" Formula/drift.rb; \
 	echo "$$old → $$new"
 
-## Update Formula/drift.rb SHA256 after uploading a release zip.
-## Run this once the GitHub release zip is live:
+## Update Formula/drift.rb SHA256 after uploading release zips.
+## Run this once both GitHub release zips are live:
 ##   make update-formula
 update-formula:
 	@ver=$$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'); \
-	url="https://github.com/aeroxy/drift/releases/download/$$ver/drift_macos_arm64.zip"; \
-	echo "Fetching $$url …"; \
-	sha=$$(curl -sL "$$url" | shasum -a 256 | cut -d' ' -f1); \
-	echo "SHA256: $$sha"; \
-	sed -i '' "s/sha256 \"[a-f0-9]*\"/sha256 \"$$sha\"/" Formula/drift.rb; \
+	mac_url="https://github.com/aeroxy/drift/releases/download/$$ver/drift_macos_arm64.zip"; \
+	lin_url="https://github.com/aeroxy/drift/releases/download/$$ver/drift_linux_x86_64.zip"; \
+	echo "Fetching macOS SHA256 …"; \
+	mac_sha=$$(curl -sL "$$mac_url" | shasum -a 256 | cut -d' ' -f1); \
+	echo "macOS SHA256: $$mac_sha"; \
+	echo "Fetching Linux SHA256 …"; \
+	lin_sha=$$(curl -sL "$$lin_url" | shasum -a 256 | cut -d' ' -f1); \
+	echo "Linux SHA256: $$lin_sha"; \
+	sed -i '' "/drift_macos_arm64\.zip/{n; s/sha256 \"[a-f0-9]*\"/sha256 \"$$mac_sha\"/;}" Formula/drift.rb; \
+	sed -i '' "/drift_linux_x86_64\.zip/{n; s/sha256 \"[a-f0-9]*\"/sha256 \"$$lin_sha\"/;}" Formula/drift.rb; \
 	echo "Formula/drift.rb updated"

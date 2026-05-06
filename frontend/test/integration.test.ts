@@ -687,3 +687,109 @@ describe('--disable-ui flag', () => {
     }
   }, 30_000);
 });
+
+interface ReconnectInfoResponse {
+  has_remote: boolean;
+  can_reconnect: boolean;
+  last_target: string | null;
+}
+
+async function getInfo(baseUrl: string): Promise<ReconnectInfoResponse> {
+  const res = await fetch(`${baseUrl}/api/info`);
+  return await res.json();
+}
+
+async function waitFor(
+  baseUrl: string,
+  predicate: (i: ReconnectInfoResponse) => boolean,
+  timeoutMs = 15_000,
+): Promise<ReconnectInfoResponse> {
+  const deadline = Date.now() + timeoutMs;
+  let last: ReconnectInfoResponse | null = null;
+  while (Date.now() < deadline) {
+    try {
+      last = await getInfo(baseUrl);
+      if (predicate(last)) return last;
+    } catch {
+      // server may be transitioning
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`Predicate not satisfied within ${timeoutMs}ms (last: ${JSON.stringify(last)})`);
+}
+
+describe('drift reconnect', () => {
+  let hostProc: DriftProcess | null = null;
+  let clientProc: DriftProcess | null = null;
+  let hostDir: string;
+  let clientDir: string;
+  let hostPort: number;
+
+  beforeAll(async () => {
+    hostDir = fs.mkdtempSync('/tmp/drift-reconnect-host-');
+    clientDir = fs.mkdtempSync('/tmp/drift-reconnect-client-');
+    hostPort = await getAvailablePort();
+    const clientPort = await getAvailablePort();
+
+    hostProc = new DriftProcess({ port: hostPort, cwd: hostDir });
+    clientProc = new DriftProcess({
+      port: clientPort,
+      cwd: clientDir,
+      target: `127.0.0.1:${hostPort}`,
+    });
+
+    await hostProc.start();
+    await clientProc.start();
+
+    // Wait for the CLI-initiated connection to come up
+    await waitFor(clientProc.baseUrl, (i) => i.has_remote);
+  }, 60_000);
+
+  afterAll(async () => {
+    await Promise.all([hostProc?.stop(), clientProc?.stop()]);
+    fs.rmSync(hostDir, { recursive: true, force: true });
+    fs.rmSync(clientDir, { recursive: true, force: true });
+  }, 30_000);
+
+  it('preserves last_target after the remote drops and clears it after intentional disconnect', async () => {
+    // While connected: last_target is set (CLI-initialized), can_reconnect is false
+    const connected = await getInfo(clientProc!.baseUrl);
+    expect(connected.has_remote).toBe(true);
+    expect(connected.last_target).toBe(`127.0.0.1:${hostPort}`);
+    expect(connected.can_reconnect).toBe(false);
+
+    // Kill the host — client should detect disconnect and surface can_reconnect
+    await hostProc!.stop();
+    hostProc = null;
+
+    const dropped = await waitFor(
+      clientProc!.baseUrl,
+      (i) => !i.has_remote && i.can_reconnect,
+    );
+    expect(dropped.last_target).toBe(`127.0.0.1:${hostPort}`);
+
+    // Bring the host back on the same port and reconnect
+    hostProc = new DriftProcess({ port: hostPort, cwd: hostDir });
+    await hostProc.start();
+
+    const reconnectRes = await fetch(`${clientProc!.baseUrl}/api/reconnect`, { method: 'POST' });
+    const reconnectBody = await reconnectRes.json() as { success: boolean; error?: string };
+    expect(reconnectBody.success, `reconnect failed: ${reconnectBody.error}`).toBe(true);
+
+    const reconnected = await waitFor(clientProc!.baseUrl, (i) => i.has_remote);
+    expect(reconnected.can_reconnect).toBe(false);
+    expect(reconnected.last_target).toBe(`127.0.0.1:${hostPort}`);
+
+    // Intentional disconnect clears the stored credentials
+    await fetch(`${clientProc!.baseUrl}/api/disconnect`, { method: 'POST' });
+    const cleared = await waitFor(clientProc!.baseUrl, (i) => !i.has_remote);
+    expect(cleared.can_reconnect).toBe(false);
+    expect(cleared.last_target).toBeNull();
+
+    // /api/reconnect now returns success: false because there's nothing to reconnect to
+    const noCreds = await fetch(`${clientProc!.baseUrl}/api/reconnect`, { method: 'POST' });
+    const noCredsBody = await noCreds.json() as { success: boolean; error?: string };
+    expect(noCredsBody.success).toBe(false);
+    expect(noCredsBody.error).toMatch(/no previous connection/i);
+  }, 60_000);
+});

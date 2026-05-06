@@ -212,6 +212,11 @@ pub async fn connect_to_remote(
     tracing::info!("Handshake complete, connection encrypted (fingerprint: {})", fp);
     *state.fingerprint.write().await = Some(fp);
 
+    // Remember credentials for FE Reconnect button. Only stored once the
+    // handshake succeeds — we never retain creds for a connection that failed.
+    *state.last_target.write().await = Some(target.to_string());
+    *state.last_password.write().await = password.clone();
+
     let crypto = Arc::new(crypto);
 
     // Single unified outbound channel: pre-encoded frames (type byte + payload).

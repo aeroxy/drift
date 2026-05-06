@@ -28,6 +28,11 @@ pub struct AppState {
     pub browser_events: broadcast::Sender<ControlMessage>,
     /// Short hex fingerprint of the DH shared secret (for visual MITM verification).
     pub fingerprint: RwLock<Option<String>>,
+    /// Most recent successfully-connected target and password, retained across
+    /// unexpected disconnects so the FE can offer a Reconnect button. Cleared
+    /// only on intentional disconnect (`/api/disconnect`).
+    pub last_target: RwLock<Option<String>>,
+    pub last_password: RwLock<Option<String>>,
 }
 
 pub type ResponseChannel = oneshot::Sender<ControlMessage>;
@@ -56,6 +61,8 @@ impl AppState {
     pub fn new(config: AppConfig) -> Self {
         let transfer_receiver = transfer_receiver::TransferReceiver::new(config.root_dir.clone());
         let (browser_events, _) = broadcast::channel(16);
+        let last_target = RwLock::new(config.target.clone());
+        let last_password = RwLock::new(config.password.clone());
         Self {
             config,
             remote: RwLock::new(None),
@@ -63,13 +70,17 @@ impl AppState {
             pending_completions: Mutex::new(HashMap::new()),
             browser_events,
             fingerprint: RwLock::new(None),
+            last_target,
+            last_password,
         }
     }
 }
 
 /// Tear down the current remote connection (if any) from either side.
 /// Aborts all read/write tasks, clears state, and broadcasts ConnectionStatus false.
-pub async fn disconnect_remote(state: &AppState) {
+/// `clear_creds`: when true, also forget the last target/password so the FE no
+/// longer offers a Reconnect option. Use true on intentional disconnects.
+pub async fn disconnect_remote(state: &AppState, clear_creds: bool) {
     let connection = {
         let mut remote = state.remote.write().await;
         remote.take()
@@ -80,6 +91,10 @@ pub async fn disconnect_remote(state: &AppState) {
         }
     }
     *state.fingerprint.write().await = None;
+    if clear_creds {
+        *state.last_target.write().await = None;
+        *state.last_password.write().await = None;
+    }
     let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: false });
 }
 
@@ -91,6 +106,7 @@ pub async fn run(state: Arc<AppState>, port: Option<u16>) -> anyhow::Result<()> 
             .route("/api/browse", get(file_api::browse))
             .route("/api/info", get(file_api::info))
             .route("/api/connect", axum::routing::post(file_api::connect))
+            .route("/api/reconnect", axum::routing::post(file_api::reconnect))
             .route("/api/disconnect", axum::routing::post(file_api::disconnect))
             .fallback(static_handler);
     }
