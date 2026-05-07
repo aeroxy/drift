@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Loader2, Plug, PlugZap, RotateCw, Unplug, Wifi, WifiOff } from "lucide-react";
+import { ArrowLeft, ArrowRight, Loader2, Plug, PlugZap, RotateCw, Unplug, Wifi, WifiOff, X } from "lucide-react";
 
 interface ToolbarProps {
   connected: boolean;
@@ -9,6 +9,8 @@ interface ToolbarProps {
   remoteSelected: number;
   onCopyToRemote: () => void;
   onCopyToLocal: () => void;
+  onClearLocal?: () => void;
+  onClearRemote?: () => void;
   transferring?: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
@@ -27,6 +29,8 @@ export default function Toolbar({
   remoteSelected,
   onCopyToRemote,
   onCopyToLocal,
+  onClearLocal,
+  onClearRemote,
   transferring = false,
   onConnect,
   onDisconnect,
@@ -37,6 +41,15 @@ export default function Toolbar({
 }: ToolbarProps) {
   return (
     <div className="flex items-center justify-center gap-3 py-3">
+      {remoteSelected > 0 && onClearRemote && (
+        <button
+          onClick={onClearRemote}
+          title="Clear remote selection"
+          className="flex items-center text-zinc-500 hover:text-red-400 transition-colors"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      )}
       <button
         onClick={onCopyToLocal}
         disabled={!hasRemote || remoteSelected === 0 || transferring}
@@ -47,7 +60,7 @@ export default function Toolbar({
         ) : (
           <ArrowLeft className="w-4 h-4" />
         )}
-        Copy
+        Copy{remoteSelected > 0 ? ` (${remoteSelected})` : ""}
       </button>
 
       <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-zinc-800/50 border border-zinc-700/50">
@@ -110,13 +123,22 @@ export default function Toolbar({
         disabled={!hasRemote || localSelected === 0 || transferring}
         className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors border border-zinc-700"
       >
-        Copy
+        Copy{localSelected > 0 ? ` (${localSelected})` : ""}
         {transferring ? (
           <Loader2 className="w-4 h-4 animate-spin" />
         ) : (
           <ArrowRight className="w-4 h-4" />
         )}
       </button>
+      {localSelected > 0 && onClearLocal && (
+        <button
+          onClick={onClearLocal}
+          title="Clear local selection"
+          className="flex items-center text-zinc-500 hover:text-red-400 transition-colors"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }

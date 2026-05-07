@@ -25,7 +25,7 @@
 - Single self-contained binary (React frontend embedded)
 - End-to-end encryption via X25519 key exchange + ChaCha20-Poly1305
 - Optional password authentication
-- Two-pane file browser UI (`hostname:/pwd` on each side)
+- Two-pane file browser UI (`hostname:/pwd` on each side) with multi-select (Cmd/Ctrl-click to toggle, Shift-click to range-select)
 - Large file support with chunked streaming and progress indication
 - Recursive directory transfer (auto-compressed via tar.gz)
 - Direct CLI file send mode (`--file`) — no web UI needed

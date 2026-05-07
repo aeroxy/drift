@@ -2,6 +2,8 @@
 
 A **push** sends files from the machine where the browser is open to the remote peer.
 
+A single `TransferRequest` carries `entries: Vec<TransferEntry>`, so multi-select in the browser produces one push that streams every selected file/folder under one transfer ID. Each folder entry is compressed to its own `.drift/{name}.tar.gz` before sending and decompressed individually on the receiver — there is no top-level "bundle everything into one archive" step.
+
 ## Flow
 
 ```

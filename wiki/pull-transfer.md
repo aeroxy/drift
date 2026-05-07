@@ -2,6 +2,8 @@
 
 A **pull** requests files from the remote peer and downloads them to the machine where the browser is open.
 
+A single `TransferRequest` carries `entries: Vec<TransferEntry>`, so multi-select in the browser produces one pull that fetches every selected remote file/folder under one transfer ID. Each remote folder is compressed to its own `.drift/{name}.tar.gz` on the remote side before being streamed back, then decompressed individually on the receiver — there is no top-level "bundle everything into one archive" step.
+
 ## Flow
 
 ```

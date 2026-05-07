@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import type { FileEntry } from "../types/protocol";
 import type { Transfer } from "../hooks/useTransfer";
+import type { SelectModifiers } from "./FileRow";
 import PathBar from "./PathBar";
 import FileList from "./FileList";
 import TransferBar from "./TransferBar";
@@ -11,7 +12,7 @@ interface FilePaneProps {
   cwd: string;
   entries: FileEntry[];
   selected: Set<string>;
-  onSelect: (name: string, multi: boolean) => void;
+  onSelect: (name: string, mods: SelectModifiers) => void;
   onNavigate: (path: string) => void;
   onNavigateTo: (absolutePath: string) => void;
   onRefresh: () => void;

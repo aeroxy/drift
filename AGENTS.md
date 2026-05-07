@@ -4,7 +4,7 @@ Encrypted file transfer over WebSocket with an embedded React UI.
 
 ## Project Overview
 
-drift is a single Rust binary that enables bidirectional, encrypted file/folder transfer between two machines. It embeds a React frontend served at the configured port, providing a two-pane file browser. It also supports CLI commands (`send`, `ls`, `pull`) for headless operation without the web UI.
+drift is a single Rust binary that enables bidirectional, encrypted file/folder transfer between two machines. It embeds a React frontend served at the configured port, providing a two-pane file browser with multi-select (Cmd/Ctrl-click to toggle, Shift-click to range-select). It also supports CLI commands (`send`, `ls`, `pull`) for headless operation without the web UI.
 
 ## Architecture
 

@@ -8,10 +8,12 @@ import {
 } from "lucide-react";
 import type { FileEntry } from "../types/protocol";
 
+export type SelectModifiers = { multi: boolean; range: boolean };
+
 interface FileRowProps {
   entry: FileEntry;
   selected: boolean;
-  onSelect: (name: string, multi: boolean) => void;
+  onSelect: (name: string, mods: SelectModifiers) => void;
   onNavigate: (name: string) => void;
 }
 
@@ -57,10 +59,12 @@ export default function FileRow({ entry, selected, onSelect, onNavigate }: FileR
           : "border-l-2 border-transparent hover:bg-zinc-800/50"
       }`}
       onClick={(e) => {
-        if (entry.is_dir) {
+        const multi = e.metaKey || e.ctrlKey;
+        const range = e.shiftKey;
+        if (entry.is_dir && !multi && !range) {
           onNavigate(entry.name);
         } else {
-          onSelect(entry.name, e.metaKey || e.ctrlKey);
+          onSelect(entry.name, { multi, range });
         }
       }}
       onDoubleClick={() => {
@@ -70,7 +74,7 @@ export default function FileRow({ entry, selected, onSelect, onNavigate }: FileR
       <input
         type="checkbox"
         checked={selected}
-        onChange={() => onSelect(entry.name, false)}
+        onChange={() => onSelect(entry.name, { multi: true, range: false })}
         onClick={(e) => e.stopPropagation()}
         className="accent-emerald-400"
       />

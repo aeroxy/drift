@@ -5,6 +5,7 @@ import { useTransfer } from "./hooks/useTransfer";
 import ConnectionModal from "./components/ConnectionModal";
 import FilePane from "./components/FilePane";
 import Toolbar from "./components/Toolbar";
+import type { SelectModifiers } from "./components/FileRow";
 
 export default function App() {
   // Local state
@@ -42,6 +43,11 @@ export default function App() {
   // Tracks the last successfully browsed remote path (for reverting on WS Error)
   const lastGoodRemotePathRef = useRef(".");
 
+  // Range-select anchors: index of the last single-clicked entry per pane.
+  // null after refreshes/path-changes so the next click re-establishes the anchor.
+  const lastClickedLocalRef = useRef<number | null>(null);
+  const lastClickedRemoteRef = useRef<number | null>(null);
+
   const { transfers, startTransfer, updateProgress, completeTransfer, failTransfer, hasActiveTransfers } = useTransfer();
 
   // Fetch local file listing via REST
@@ -54,6 +60,7 @@ export default function App() {
         setLocalInfo({ hostname: data.hostname, cwd: data.cwd });
         setLocalEntries(data.entries);
         setLocalSelected(new Set());
+        lastClickedLocalRef.current = null;
         return true;
       }
       return false;
@@ -77,6 +84,7 @@ export default function App() {
         setRemoteHostname(undefined);
         setRemotePath(".");
         setRemoteSelected(new Set());
+        lastClickedRemoteRef.current = null;
       }
     } catch {
       // ignore
@@ -156,6 +164,7 @@ export default function App() {
         setRemoteHostname(msg.hostname);
         setRemoteEntries(msg.entries);
         setRemoteSelected(new Set());
+        lastClickedRemoteRef.current = null;
         break;
       case "ConnectionStatus":
         setHasRemote(msg.has_remote);
@@ -165,6 +174,7 @@ export default function App() {
           setRemoteHostname(undefined);
           setRemotePath(".");
           setRemoteSelected(new Set());
+          lastClickedRemoteRef.current = null;
           setFingerprint(null);
         }
         fetchRemoteStatus();
@@ -214,28 +224,61 @@ export default function App() {
   }, [connected, hasRemote, send]);
 
   // Selection handlers
-  const handleLocalSelect = useCallback((name: string, multi: boolean) => {
-    setLocalSelected((prev) => {
-      const next = new Set(multi ? prev : []);
-      if (next.has(name)) {
-        next.delete(name);
-      } else {
-        next.add(name);
-      }
-      return next;
-    });
+  // - plain click: replace set with just this item, set anchor
+  // - cmd/ctrl-click (multi): toggle this item in the existing set, set anchor
+  // - shift-click (range): add the slice [anchor..idx] to the existing set; anchor unchanged
+  const handleLocalSelect = useCallback(
+    (name: string, mods: SelectModifiers) => {
+      const idx = localEntries.findIndex((e) => e.name === name);
+      if (idx < 0) return;
+      setLocalSelected((prev) => {
+        if (mods.range) {
+          const anchor = lastClickedLocalRef.current ?? idx;
+          const [lo, hi] = anchor < idx ? [anchor, idx] : [idx, anchor];
+          const next = new Set(prev);
+          for (let i = lo; i <= hi; i++) next.add(localEntries[i].name);
+          return next;
+        }
+        const next = new Set(mods.multi ? prev : []);
+        if (next.has(name)) next.delete(name);
+        else next.add(name);
+        lastClickedLocalRef.current = idx;
+        return next;
+      });
+    },
+    [localEntries],
+  );
+
+  const handleRemoteSelect = useCallback(
+    (name: string, mods: SelectModifiers) => {
+      const idx = remoteEntries.findIndex((e) => e.name === name);
+      if (idx < 0) return;
+      setRemoteSelected((prev) => {
+        if (mods.range) {
+          const anchor = lastClickedRemoteRef.current ?? idx;
+          const [lo, hi] = anchor < idx ? [anchor, idx] : [idx, anchor];
+          const next = new Set(prev);
+          for (let i = lo; i <= hi; i++) next.add(remoteEntries[i].name);
+          return next;
+        }
+        const next = new Set(mods.multi ? prev : []);
+        if (next.has(name)) next.delete(name);
+        else next.add(name);
+        lastClickedRemoteRef.current = idx;
+        return next;
+      });
+    },
+    [remoteEntries],
+  );
+
+  const handleClearLocal = useCallback(() => {
+    setLocalSelected(new Set());
+    lastClickedLocalRef.current = null;
   }, []);
 
-  const handleRemoteSelect = useCallback((name: string, multi: boolean) => {
-    setRemoteSelected((prev) => {
-      const next = new Set(multi ? prev : []);
-      if (next.has(name)) {
-        next.delete(name);
-      } else {
-        next.add(name);
-      }
-      return next;
-    });
+  const handleClearRemote = useCallback(() => {
+    setRemoteSelected(new Set());
+    lastClickedRemoteRef.current = null;
   }, []);
 
   // Navigation
@@ -353,6 +396,7 @@ export default function App() {
 
     // Clear selection
     setLocalSelected(new Set());
+    lastClickedLocalRef.current = null;
   }, [hasRemote, localSelected, localEntries, localPath, remotePath, send, hasActiveTransfers, startTransfer]);
 
   const handleCopyToLocal = useCallback(() => {
@@ -391,6 +435,7 @@ export default function App() {
 
     // Clear selection
     setRemoteSelected(new Set());
+    lastClickedRemoteRef.current = null;
   }, [hasRemote, remoteSelected, remoteEntries, remotePath, localPath, send, hasActiveTransfers, startTransfer]);
 
   const activeTransfers = [...transfers.values()];
@@ -401,7 +446,7 @@ export default function App() {
       <header className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/50">
         <div className="flex items-center gap-3">
           <img src="/logo.svg" alt="drift" className="h-6 invert-0 brightness-0 invert" style={{ filter: "brightness(0) invert(1) sepia(1) saturate(5) hue-rotate(120deg)" }} />
-          <span className="text-xs text-zinc-600 font-mono">v0.2.0</span>
+          <span className="text-xs text-zinc-600 font-mono">v0.3.0</span>
         </div>
       </header>
 
@@ -422,6 +467,8 @@ export default function App() {
         remoteSelected={remoteSelected.size}
         onCopyToRemote={handleCopyToRemote}
         onCopyToLocal={handleCopyToLocal}
+        onClearLocal={handleClearLocal}
+        onClearRemote={handleClearRemote}
         transferring={hasActiveTransfers}
         onConnect={() => { setConnectError(undefined); setShowConnectModal(true); }}
         onDisconnect={handleDisconnect}

@@ -1,11 +1,11 @@
 import { ArrowUp } from "lucide-react";
 import type { FileEntry } from "../types/protocol";
-import FileRow from "./FileRow";
+import FileRow, { type SelectModifiers } from "./FileRow";
 
 interface FileListProps {
   entries: FileEntry[];
   selected: Set<string>;
-  onSelect: (name: string, multi: boolean) => void;
+  onSelect: (name: string, mods: SelectModifiers) => void;
   onNavigate: (name: string) => void;
   onGoUp: () => void;
   canGoUp: boolean;

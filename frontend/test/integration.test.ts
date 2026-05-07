@@ -793,3 +793,86 @@ describe('drift reconnect', () => {
     expect(noCredsBody.error).toMatch(/no previous connection/i);
   }, 60_000);
 });
+
+// ── Multi-entry transfer (FE multi-select) ────────────────────────────────────
+//
+// Verifies that a single TransferRequest carrying multiple entries — the wire
+// shape produced by the FE multi-select feature — delivers every selected
+// file/folder in one transfer.
+
+describe('drift multi-entry transfer', () => {
+  let hostProc: DriftProcess | null = null;
+  let clientProc: DriftProcess | null = null;
+  let hostDir: string;
+  let clientDir: string;
+
+  beforeAll(async () => {
+    hostDir = fs.mkdtempSync('/tmp/drift-multi-host-');
+    clientDir = fs.mkdtempSync('/tmp/drift-multi-client-');
+
+    // Seed the client with two files and one folder containing a file.
+    fs.writeFileSync(path.join(clientDir, 'alpha.txt'), 'alpha contents\n');
+    fs.writeFileSync(path.join(clientDir, 'beta.bin'), Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]));
+    fs.mkdirSync(path.join(clientDir, 'gamma'));
+    fs.writeFileSync(path.join(clientDir, 'gamma', 'inner.txt'), 'inside gamma\n');
+
+    const hostPort = await getAvailablePort();
+    const clientPort = await getAvailablePort();
+
+    hostProc = new DriftProcess({ port: hostPort, cwd: hostDir });
+    clientProc = new DriftProcess({
+      port: clientPort,
+      cwd: clientDir,
+      target: `127.0.0.1:${hostPort}`,
+    });
+
+    await hostProc.start();
+    await clientProc.start();
+
+    await Promise.all([
+      pollForRemote(hostProc.baseUrl),
+      pollForRemote(clientProc.baseUrl),
+    ]);
+  }, 60_000);
+
+  afterAll(async () => {
+    await Promise.all([hostProc?.stop(), clientProc?.stop()]);
+    fs.rmSync(hostDir, { recursive: true, force: true });
+    fs.rmSync(clientDir, { recursive: true, force: true });
+  }, 30_000);
+
+  it('pushes 2 files + 1 folder in a single TransferRequest', async () => {
+    const expected = await computeAllChecksums(clientDir);
+    expect(expected.size, 'seed should produce three files').toBe(3);
+
+    const entries = await browseEntries(clientProc!.baseUrl);
+    const selected = entries.filter((e) => ['alpha.txt', 'beta.bin', 'gamma'].includes(e.name));
+    expect(selected.length, 'all three seeded entries should be browsable').toBe(3);
+
+    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+    try {
+      const id = crypto.randomUUID();
+      const done = ws.waitForTransferComplete(id, 120_000);
+      ws.send({
+        type: 'TransferRequest',
+        id,
+        entries: selected.map((e) => ({
+          relative_path: e.name,
+          size: e.size,
+          is_dir: e.is_dir,
+          permissions: e.permissions,
+        })),
+        direction: 'Push',
+        destination_path: '.',
+      });
+      await done;
+    } finally {
+      ws.close();
+    }
+
+    const hostAfter = await waitForChecksums(hostDir, expected);
+    for (const [rel, md5] of expected) {
+      expect(hostAfter.get(rel), `multi-entry push: "${rel}" missing on host`).toBe(md5);
+    }
+  }, 180_000);
+});
