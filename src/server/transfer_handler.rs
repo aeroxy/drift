@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use uuid::Uuid;
-use tokio::sync::mpsc;
 use axum::extract::ws::Message;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
+use crate::fileops::reader::ChunkedReader;
 use crate::protocol::messages::{ControlMessage, Direction, TransferEntry};
 use crate::server::AppState;
-use crate::fileops::reader::ChunkedReader;
 
 #[allow(dead_code)]
 pub async fn handle_transfer_request(
@@ -15,7 +15,12 @@ pub async fn handle_transfer_request(
     direction: Direction,
     ws_tx: mpsc::UnboundedSender<Message>,
 ) {
-    tracing::info!("Starting transfer: id={}, entries={}, direction={:?}", id, entries.len(), direction);
+    tracing::info!(
+        "Starting transfer: id={}, entries={}, direction={:?}",
+        id,
+        entries.len(),
+        direction
+    );
 
     // For now, only handle single file transfers (first entry)
     if entries.is_empty() {
@@ -23,7 +28,9 @@ pub async fn handle_transfer_request(
             serde_json::to_string(&ControlMessage::TransferError {
                 id,
                 error: "No files to transfer".to_string(),
-            }).unwrap().into()
+            })
+            .unwrap()
+            .into(),
         ));
         return;
     }
@@ -33,7 +40,9 @@ pub async fn handle_transfer_request(
             serde_json::to_string(&ControlMessage::TransferError {
                 id,
                 error: "Multiple file transfer not yet implemented".to_string(),
-            }).unwrap().into()
+            })
+            .unwrap()
+            .into(),
         ));
         return;
     }
@@ -44,7 +53,9 @@ pub async fn handle_transfer_request(
             serde_json::to_string(&ControlMessage::TransferError {
                 id,
                 error: "Directory transfer not yet implemented".to_string(),
-            }).unwrap().into()
+            })
+            .unwrap()
+            .into(),
         ));
         return;
     }
@@ -56,14 +67,20 @@ pub async fn handle_transfer_request(
                 serde_json::to_string(&ControlMessage::TransferAccepted {
                     id,
                     resume_offsets: std::collections::HashMap::new(),
-                }).unwrap().into()
+                })
+                .unwrap()
+                .into(),
             ));
 
             // Read local file and send to remote
             let file_path = state.config.root_dir.join(&entry.relative_path);
             match ChunkedReader::open(&file_path, 0).await {
                 Ok(mut reader) => {
-                    tracing::info!("Reading file: {:?} ({} bytes)", file_path, reader.total_size());
+                    tracing::info!(
+                        "Reading file: {:?} ({} bytes)",
+                        file_path,
+                        reader.total_size()
+                    );
 
                     while let Ok(Some((offset, chunk))) = reader.read_chunk().await {
                         // Send progress
@@ -73,7 +90,9 @@ pub async fn handle_transfer_request(
                                 path: entry.relative_path.clone(),
                                 bytes_done: offset + chunk.len() as u64,
                                 bytes_total: reader.total_size(),
-                            }).unwrap().into()
+                            })
+                            .unwrap()
+                            .into(),
                         ));
 
                         // In a real implementation, we would send binary frames here
@@ -83,7 +102,12 @@ pub async fn handle_transfer_request(
 
                     // Send complete
                     let _ = ws_tx.send(Message::Text(
-                        serde_json::to_string(&ControlMessage::TransferComplete { id, total_bytes: 0 }).unwrap().into()
+                        serde_json::to_string(&ControlMessage::TransferComplete {
+                            id,
+                            total_bytes: 0,
+                        })
+                        .unwrap()
+                        .into(),
                     ));
                     tracing::info!("Transfer complete: {}", id);
                 }
@@ -92,7 +116,9 @@ pub async fn handle_transfer_request(
                         serde_json::to_string(&ControlMessage::TransferError {
                             id,
                             error: format!("Failed to open file: {}", e),
-                        }).unwrap().into()
+                        })
+                        .unwrap()
+                        .into(),
                     ));
                 }
             }
@@ -102,7 +128,9 @@ pub async fn handle_transfer_request(
                 serde_json::to_string(&ControlMessage::TransferError {
                     id,
                     error: "Pull transfer not yet implemented".to_string(),
-                }).unwrap().into()
+                })
+                .unwrap()
+                .into(),
             ));
         }
     }

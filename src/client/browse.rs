@@ -4,7 +4,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::protocol::messages::{ControlMessage, FileEntry};
 
 use super::perform_client_handshake;
-use super::send::{send_encrypted_control, recv_encrypted_control};
+use super::send::{recv_control_with_replies, send_encrypted_control};
 
 /// Connect to a remote drift server and list files at the given path.
 pub async fn browse_remote(
@@ -16,18 +16,25 @@ pub async fn browse_remote(
     let (ws_stream, _) = super::open_ws(target, allow_insecure_tls).await?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    let (crypto, fp, _) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
     tracing::info!("Encrypted connection established (fingerprint: {})", fp);
 
     let browse_path = path.unwrap_or(".").to_string();
-    send_encrypted_control(&crypto, &mut ws_write, &ControlMessage::BrowseRequest {
-        path: browse_path,
-    }).await?;
+    send_encrypted_control(
+        &crypto,
+        &mut ws_write,
+        &ControlMessage::BrowseRequest { path: browse_path },
+    )
+    .await?;
 
-    let response = recv_encrypted_control(&crypto, &mut ws_read).await?;
+    let response = recv_control_with_replies(&crypto, &mut ws_write, &mut ws_read).await?;
 
     match response {
-        ControlMessage::BrowseResponse { hostname, cwd, entries } => {
+        ControlMessage::BrowseResponse {
+            hostname,
+            cwd,
+            entries,
+        } => {
             println!("{}:{}", hostname, cwd);
             if entries.is_empty() {
                 println!("  (empty)");
@@ -56,7 +63,12 @@ fn print_entries(entries: &[FileEntry]) {
         #[cfg(unix)]
         let perms = format_permissions(entry.permissions, entry.is_dir);
         #[cfg(not(unix))]
-        let perms = if entry.is_dir { "d---------" } else { "----------" }.to_string();
+        let perms = if entry.is_dir {
+            "d---------"
+        } else {
+            "----------"
+        }
+        .to_string();
 
         let timestamp = format_timestamp(entry.modified);
         let name = if entry.is_dir {
@@ -65,8 +77,12 @@ fn print_entries(entries: &[FileEntry]) {
             entry.name.clone()
         };
 
-        println!("{}  {:>width$}  {}  {}",
-            perms, size_str, timestamp, name,
+        println!(
+            "{}  {:>width$}  {}  {}",
+            perms,
+            size_str,
+            timestamp,
+            name,
             width = max_size_width,
         );
     }
@@ -108,7 +124,10 @@ fn format_timestamp(unix_secs: u64) -> String {
     // Days since 1970-01-01 to year/month/day (civil calendar)
     let (year, month, day) = days_to_date(days);
 
-    format!("{:04}-{:02}-{:02} {:02}:{:02}", year, month, day, hours, minutes)
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        year, month, day, hours, minutes
+    )
 }
 
 fn days_to_date(days_since_epoch: i64) -> (i64, u32, u32) {

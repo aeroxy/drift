@@ -1,14 +1,14 @@
+use axum::extract::ws::Message;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use uuid::Uuid;
 use tokio::sync::mpsc;
-use axum::extract::ws::Message;
+use uuid::Uuid;
 
-use crate::protocol::messages::{ControlMessage, Direction, TransferEntry};
-use crate::protocol::codec::{encode_data_frame, encode_control_frame};
-use crate::server::{AppState, FrameChannel};
-use crate::fileops::reader::ChunkedReader;
 use crate::fileops::compress;
+use crate::fileops::reader::ChunkedReader;
+use crate::protocol::codec::{encode_control_frame, encode_data_frame_v1, encode_data_frame_v2};
+use crate::protocol::messages::{ControlMessage, Direction, TransferEntry};
+use crate::server::{AppState, FrameChannel};
 
 /// Validate that a relative path resolves to a location within root_dir.
 /// Returns the validated path on success, or an error message on failure.
@@ -16,7 +16,8 @@ fn validate_path(root_dir: &Path, relative_path: &str) -> Result<PathBuf, String
     let target = root_dir.join(relative_path);
     match target.canonicalize() {
         Ok(canonical) => {
-            let root_canonical = root_dir.canonicalize()
+            let root_canonical = root_dir
+                .canonicalize()
                 .map_err(|e| format!("Invalid root: {}", e))?;
             if canonical.starts_with(&root_canonical) {
                 Ok(canonical)
@@ -28,9 +29,11 @@ fn validate_path(root_dir: &Path, relative_path: &str) -> Result<PathBuf, String
         Err(_) => {
             if let Some(parent) = target.parent() {
                 if parent.exists() {
-                    let parent_canonical = parent.canonicalize()
+                    let parent_canonical = parent
+                        .canonicalize()
                         .map_err(|e| format!("Invalid parent: {}", e))?;
-                    let root_canonical = root_dir.canonicalize()
+                    let root_canonical = root_dir
+                        .canonicalize()
                         .map_err(|e| format!("Invalid root: {}", e))?;
                     if parent_canonical.starts_with(&root_canonical) {
                         return Ok(target);
@@ -50,7 +53,13 @@ pub async fn handle_browser_transfer(
     destination_path: String,
     ws_tx: mpsc::UnboundedSender<Message>,
 ) {
-    tracing::info!("Browser transfer request: id={}, entries={}, direction={:?}, dest={}", id, entries.len(), direction, destination_path);
+    tracing::info!(
+        "Browser transfer request: id={}, entries={}, direction={:?}, dest={}",
+        id,
+        entries.len(),
+        direction,
+        destination_path
+    );
 
     let remote = state.remote.read().await;
     if remote.is_none() {
@@ -62,7 +71,12 @@ pub async fn handle_browser_transfer(
     // Binary frames from the remote can arrive before TransferAccepted is processed,
     // so the receiver must be ready or chunks would be silently dropped (and lost).
     let pull_done_rx = if direction == Direction::Pull {
-        Some(state.transfer_receiver.start_transfer_with_notify(id, entries.clone(), destination_path.clone()).await)
+        Some(
+            state
+                .transfer_receiver
+                .start_transfer_with_notify(id, entries.clone(), destination_path.clone())
+                .await,
+        )
     } else {
         None
     };
@@ -93,7 +107,9 @@ pub async fn handle_browser_transfer(
                 serde_json::to_string(&ControlMessage::TransferAccepted {
                     id,
                     resume_offsets: std::collections::HashMap::new(),
-                }).unwrap().into()
+                })
+                .unwrap()
+                .into(),
             ));
 
             match direction {
@@ -105,17 +121,22 @@ pub async fn handle_browser_transfer(
                 Direction::Pull => {
                     let done_rx = pull_done_rx.expect("pull_done_rx set above for Pull");
 
-                    match tokio::time::timeout(std::time::Duration::from_secs(1800), done_rx).await {
+                    match tokio::time::timeout(std::time::Duration::from_secs(1800), done_rx).await
+                    {
                         Ok(Ok(())) => {
                             tracing::info!("Pull transfer complete: {}", id);
                             let _ = ws_tx.send(Message::Text(
                                 serde_json::to_string(&ControlMessage::TransferComplete {
                                     id,
                                     total_bytes: 0,
-                                }).unwrap().into()
+                                })
+                                .unwrap()
+                                .into(),
                             ));
                         }
-                        Ok(Err(_)) => send_error(&ws_tx, id, "Pull transfer channel closed unexpectedly"),
+                        Ok(Err(_)) => {
+                            send_error(&ws_tx, id, "Pull transfer channel closed unexpectedly")
+                        }
                         Err(_) => send_error(&ws_tx, id, "Pull transfer timed out"),
                     }
                 }
@@ -135,16 +156,20 @@ pub async fn send_entries(
     id: Uuid,
     entries: &[TransferEntry],
     frame_tx: &FrameChannel,
+    peer_version: Option<u32>,
 ) {
     let mut files_to_send: Vec<(String, PathBuf, u64, Option<PathBuf>)> = Vec::new();
 
     for entry in entries {
         // Validate path before any file operations
         if let Err(e) = validate_path(root_dir, &entry.relative_path) {
-            send_control(frame_tx, &ControlMessage::TransferError {
-                id,
-                error: format!("Invalid path {}: {}", entry.relative_path, e),
-            });
+            send_control(
+                frame_tx,
+                &ControlMessage::TransferError {
+                    id,
+                    error: format!("Invalid path {}: {}", entry.relative_path, e),
+                },
+            );
             cleanup_archives(&files_to_send);
             return;
         }
@@ -160,10 +185,13 @@ pub async fn send_entries(
                     ));
                 }
                 Err(e) => {
-                    send_control(frame_tx, &ControlMessage::TransferError {
-                        id,
-                        error: format!("Failed to compress {}: {}", entry.relative_path, e),
-                    });
+                    send_control(
+                        frame_tx,
+                        &ControlMessage::TransferError {
+                            id,
+                            error: format!("Failed to compress {}: {}", entry.relative_path, e),
+                        },
+                    );
                     cleanup_archives(&files_to_send);
                     return;
                 }
@@ -174,20 +202,30 @@ pub async fn send_entries(
         }
     }
 
+    let use_v2 = peer_version >= Some(crate::protocol::messages::MIN_MULTI_FILE_VERSION);
     let mut total_sent: u64 = 0;
 
-    for (display_name, file_path, _file_size, _cleanup) in &files_to_send {
+    for (file_idx, (display_name, file_path, _file_size, _cleanup)) in
+        files_to_send.iter().enumerate()
+    {
         match ChunkedReader::open(file_path, 0).await {
             Ok(mut reader) => {
                 tracing::info!("Sending: {} ({} bytes)", display_name, reader.total_size());
 
                 while let Ok(Some((_offset, chunk))) = reader.read_chunk().await {
-                    let frame = encode_data_frame(id, total_sent, &chunk);
+                    let frame = if use_v2 {
+                        encode_data_frame_v2(id, file_idx as u32, total_sent, &chunk)
+                    } else {
+                        encode_data_frame_v1(id, total_sent, &chunk)
+                    };
                     if frame_tx.send(frame).is_err() {
-                        send_control(frame_tx, &ControlMessage::TransferError {
-                            id,
-                            error: "Connection lost while sending".to_string(),
-                        });
+                        send_control(
+                            frame_tx,
+                            &ControlMessage::TransferError {
+                                id,
+                                error: "Connection lost while sending".to_string(),
+                            },
+                        );
                         cleanup_archives(&files_to_send);
                         return;
                     }
@@ -195,17 +233,26 @@ pub async fn send_entries(
                 }
             }
             Err(e) => {
-                send_control(frame_tx, &ControlMessage::TransferError {
-                    id,
-                    error: format!("Failed to open {}: {}", display_name, e),
-                });
+                send_control(
+                    frame_tx,
+                    &ControlMessage::TransferError {
+                        id,
+                        error: format!("Failed to open {}: {}", display_name, e),
+                    },
+                );
                 cleanup_archives(&files_to_send);
                 return;
             }
         }
     }
 
-    send_control(frame_tx, &ControlMessage::TransferComplete { id, total_bytes: total_sent });
+    send_control(
+        frame_tx,
+        &ControlMessage::TransferComplete {
+            id,
+            total_bytes: total_sent,
+        },
+    );
     tracing::info!("send_entries complete: {} ({} bytes)", id, total_sent);
 
     cleanup_archives(&files_to_send);
@@ -219,10 +266,19 @@ async fn push_entries(
     entries: &[TransferEntry],
     ws_tx: &mpsc::UnboundedSender<Message>,
 ) {
-    let frame_tx = {
+    let (frame_tx, peer_version) = {
         let remote = state.remote.read().await;
-        remote.as_ref().map(|r| r.frame_tx.clone())
+        remote
+            .as_ref()
+            .map(|r| (r.frame_tx.clone(), r.peer_version))
+            .unzip()
     };
+    let peer_version = peer_version.flatten();
+    tracing::debug!(
+        "push_entries: peer_version = {:?}, use_v2 = {}",
+        peer_version,
+        peer_version >= Some(crate::protocol::messages::MIN_MULTI_FILE_VERSION)
+    );
 
     let Some(frame_tx) = frame_tx else {
         send_error(ws_tx, id, "Remote connection lost");
@@ -234,7 +290,11 @@ async fn push_entries(
     for entry in entries {
         // Validate path before any file operations
         if let Err(e) = validate_path(&state.config.root_dir, &entry.relative_path) {
-            send_error(ws_tx, id, &format!("Invalid path {}: {}", entry.relative_path, e));
+            send_error(
+                ws_tx,
+                id,
+                &format!("Invalid path {}: {}", entry.relative_path, e),
+            );
             cleanup_archives(&files_to_send);
             return;
         }
@@ -250,7 +310,11 @@ async fn push_entries(
                     ));
                 }
                 Err(e) => {
-                    send_error(ws_tx, id, &format!("Failed to compress {}: {}", entry.relative_path, e));
+                    send_error(
+                        ws_tx,
+                        id,
+                        &format!("Failed to compress {}: {}", entry.relative_path, e),
+                    );
                     cleanup_archives(&files_to_send);
                     return;
                 }
@@ -262,6 +326,7 @@ async fn push_entries(
     }
 
     let total_size: u64 = files_to_send.iter().map(|(_, _, s, _)| s).sum();
+    let use_v2 = peer_version >= Some(crate::protocol::messages::MIN_MULTI_FILE_VERSION);
     let mut total_sent: u64 = 0;
 
     // Register completion waiter BEFORE sending any data, so TransferFinalized
@@ -269,13 +334,19 @@ async fn push_entries(
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
     state.pending_completions.lock().await.insert(id, done_tx);
 
-    for (display_name, file_path, _file_size, _cleanup) in &files_to_send {
+    for (file_idx, (display_name, file_path, _file_size, _cleanup)) in
+        files_to_send.iter().enumerate()
+    {
         match ChunkedReader::open(file_path, 0).await {
             Ok(mut reader) => {
                 tracing::info!("Sending: {} ({} bytes)", display_name, reader.total_size());
 
                 while let Ok(Some((_offset, chunk))) = reader.read_chunk().await {
-                    let frame = encode_data_frame(id, total_sent, &chunk);
+                    let frame = if use_v2 {
+                        encode_data_frame_v2(id, file_idx as u32, total_sent, &chunk)
+                    } else {
+                        encode_data_frame_v1(id, total_sent, &chunk)
+                    };
                     if frame_tx.send(frame).is_err() {
                         state.pending_completions.lock().await.remove(&id);
                         send_error(ws_tx, id, "Connection to remote lost");
@@ -290,13 +361,19 @@ async fn push_entries(
                             path: display_name.clone(),
                             bytes_done: total_sent,
                             bytes_total: total_size,
-                        }).unwrap().into()
+                        })
+                        .unwrap()
+                        .into(),
                     ));
                 }
             }
             Err(e) => {
                 state.pending_completions.lock().await.remove(&id);
-                send_error(ws_tx, id, &format!("Failed to open {}: {}", display_name, e));
+                send_error(
+                    ws_tx,
+                    id,
+                    &format!("Failed to open {}: {}", display_name, e),
+                );
                 cleanup_archives(&files_to_send);
                 return;
             }
@@ -304,7 +381,13 @@ async fn push_entries(
     }
 
     // Tell the remote we're done sending (with byte count for verification)
-    send_control(&frame_tx, &ControlMessage::TransferComplete { id, total_bytes: total_sent });
+    send_control(
+        &frame_tx,
+        &ControlMessage::TransferComplete {
+            id,
+            total_bytes: total_sent,
+        },
+    );
 
     // Wait for the remote to confirm receipt before telling the browser
     match tokio::time::timeout(std::time::Duration::from_secs(300), done_rx).await {
@@ -314,7 +397,9 @@ async fn push_entries(
                 serde_json::to_string(&ControlMessage::TransferComplete {
                     id,
                     total_bytes: total_sent,
-                }).unwrap().into()
+                })
+                .unwrap()
+                .into(),
             ));
         }
         Ok(Err(_)) => {
@@ -322,7 +407,11 @@ async fn push_entries(
         }
         Err(_) => {
             state.pending_completions.lock().await.remove(&id);
-            send_error(ws_tx, id, "Remote did not confirm transfer within 5 minutes");
+            send_error(
+                ws_tx,
+                id,
+                "Remote did not confirm transfer within 5 minutes",
+            );
         }
     }
 
@@ -339,7 +428,9 @@ fn send_error(ws_tx: &mpsc::UnboundedSender<Message>, id: Uuid, error: &str) {
         serde_json::to_string(&ControlMessage::TransferError {
             id,
             error: error.to_string(),
-        }).unwrap().into()
+        })
+        .unwrap()
+        .into(),
     ));
 }
 

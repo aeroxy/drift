@@ -1,5 +1,5 @@
-use std::path::Path;
 use futures_util::{SinkExt, StreamExt};
+use std::path::Path;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
@@ -8,8 +8,8 @@ use crate::fileops::decompress;
 use crate::fileops::writer::ChunkedWriter;
 use crate::protocol::messages::{ControlMessage, Direction, TransferEntry};
 
-use super::{perform_client_handshake, recv_encrypted_frame, DecryptedFrame, WsRead, WsWrite};
-use super::send::{send_encrypted_control, recv_encrypted_control, format_bytes};
+use super::send::{format_bytes, recv_control_with_replies, send_encrypted_control};
+use super::{DecryptedFrame, WsRead, WsWrite, perform_client_handshake, recv_encrypted_frame};
 
 /// Connect to a remote drift server and pull a file or folder.
 pub async fn pull_remote(
@@ -22,24 +22,28 @@ pub async fn pull_remote(
     let (ws_stream, _) = super::open_ws(target, allow_insecure_tls).await?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    let (crypto, fp, _) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
     tracing::info!("Encrypted connection established (fingerprint: {})", fp);
 
     // Discover file metadata by browsing the parent directory
     let (parent, file_name) = split_remote_path(remote_path);
 
-    send_encrypted_control(&crypto, &mut ws_write, &ControlMessage::BrowseRequest {
-        path: parent.to_string(),
-    }).await?;
+    send_encrypted_control(
+        &crypto,
+        &mut ws_write,
+        &ControlMessage::BrowseRequest {
+            path: parent.to_string(),
+        },
+    )
+    .await?;
 
-    let response = recv_encrypted_control(&crypto, &mut ws_read).await?;
+    let response = recv_control_with_replies(&crypto, &mut ws_write, &mut ws_read).await?;
 
     let entry_info = match response {
-        ControlMessage::BrowseResponse { entries, .. } => {
-            entries.into_iter()
-                .find(|e| e.name == file_name)
-                .ok_or_else(|| anyhow::anyhow!("'{}' not found on remote", remote_path))?
-        }
+        ControlMessage::BrowseResponse { entries, .. } => entries
+            .into_iter()
+            .find(|e| e.name == file_name)
+            .ok_or_else(|| anyhow::anyhow!("'{}' not found on remote", remote_path))?,
         ControlMessage::Error { message } => {
             anyhow::bail!("Browse failed: {}", message);
         }
@@ -51,7 +55,8 @@ pub async fn pull_remote(
     let is_dir = entry_info.is_dir;
     let expected_size = entry_info.size;
 
-    tracing::info!("Found: {} ({}, {})",
+    tracing::info!(
+        "Found: {} ({}, {})",
         file_name,
         if is_dir { "directory" } else { "file" },
         format_bytes(expected_size),
@@ -67,18 +72,25 @@ pub async fn pull_remote(
         permissions: entry_info.permissions,
     };
 
-    let destination = output_dir.map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+    let destination = output_dir
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
 
-    send_encrypted_control(&crypto, &mut ws_write, &ControlMessage::TransferRequest {
-        id: transfer_id,
-        entries: vec![entry],
-        direction: Direction::Pull,
-        destination_path: destination,
-    }).await?;
+    send_encrypted_control(
+        &crypto,
+        &mut ws_write,
+        &ControlMessage::TransferRequest {
+            id: transfer_id,
+            entries: vec![entry],
+            direction: Direction::Pull,
+            destination_path: destination,
+        },
+    )
+    .await?;
 
     // Wait for acceptance
     loop {
-        let msg = recv_encrypted_control(&crypto, &mut ws_read).await?;
+        let msg = recv_control_with_replies(&crypto, &mut ws_write, &mut ws_read).await?;
         match msg {
             ControlMessage::TransferAccepted { id, .. } if id == transfer_id => {
                 tracing::info!("Transfer accepted");
@@ -108,9 +120,13 @@ pub async fn pull_remote(
     // Receive data
     tracing::info!("Pulling {} ...", file_name);
     receive_transfer(
-        &crypto, &mut ws_write, &mut ws_read,
-        transfer_id, &write_path,
-    ).await?;
+        &crypto,
+        &mut ws_write,
+        &mut ws_read,
+        transfer_id,
+        &write_path,
+    )
+    .await?;
 
     // Decompress if directory
     if is_dir {
@@ -140,7 +156,11 @@ async fn receive_transfer(
 
     loop {
         match recv_encrypted_frame(crypto, ws_read).await? {
-            DecryptedFrame::Data { transfer_id: id, chunk, .. } if id == transfer_id => {
+            DecryptedFrame::Data {
+                transfer_id: id,
+                chunk,
+                ..
+            } if id == transfer_id => {
                 received += chunk.len() as u64;
                 writer.write_chunk(&chunk).await?;
 
@@ -151,18 +171,25 @@ async fn receive_transfer(
                     last_percent = percent;
                 }
             }
-            DecryptedFrame::Control(ControlMessage::TransferComplete { id, total_bytes }) if id == transfer_id => {
+            DecryptedFrame::Control(ControlMessage::TransferComplete { id, total_bytes })
+                if id == transfer_id =>
+            {
                 writer.finalize().await?;
                 tracing::info!("  {} received", format_bytes(total_bytes));
 
                 // Acknowledge
-                send_encrypted_control(crypto, ws_write, &ControlMessage::TransferFinalized {
-                    id: transfer_id,
-                }).await?;
+                send_encrypted_control(
+                    crypto,
+                    ws_write,
+                    &ControlMessage::TransferFinalized { id: transfer_id },
+                )
+                .await?;
 
                 return Ok(());
             }
-            DecryptedFrame::Control(ControlMessage::TransferError { id, error }) if id == transfer_id => {
+            DecryptedFrame::Control(ControlMessage::TransferError { id, error })
+                if id == transfer_id =>
+            {
                 anyhow::bail!("Transfer error: {}", error);
             }
             _ => continue, // skip unrelated frames

@@ -24,7 +24,9 @@ pub async fn static_handler(req: Request) -> Response {
     } else {
         // SPA fallback: serve index.html for any unmatched route
         match <Assets as RustEmbed>::get("index.html") {
-            Some(content) => Html(String::from_utf8_lossy(&content.data).to_string()).into_response(),
+            Some(content) => {
+                Html(String::from_utf8_lossy(&content.data).to_string()).into_response()
+            }
             None => (StatusCode::NOT_FOUND, "Frontend not built").into_response(),
         }
     }

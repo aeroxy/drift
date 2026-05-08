@@ -141,41 +141,51 @@ async fn do_connect(
     let (err_tx, err_rx) = tokio::sync::oneshot::channel::<String>();
 
     tokio::spawn(async move {
-        if let Err(e) = crate::client::connect_to_remote(&target_clone, &password_clone, allow_insecure_tls, state_clone).await {
+        if let Err(e) = crate::client::connect_to_remote(
+            &target_clone,
+            &password_clone,
+            allow_insecure_tls,
+            state_clone,
+        )
+        .await
+        {
             let _ = err_tx.send(e.to_string());
         }
     });
 
     // Race: ConnectionStatus{true} = success, err channel = failure, timeout = give up
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        async {
-            tokio::select! {
-                event = async {
-                    loop {
-                        match event_rx.recv().await {
-                            Ok(ControlMessage::ConnectionStatus { has_remote: true }) => break Ok(()),
-                            Err(_) => break Err("Event channel closed".to_string()),
-                            _ => continue,
-                        }
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::select! {
+            event = async {
+                loop {
+                    match event_rx.recv().await {
+                        Ok(ControlMessage::ConnectionStatus { has_remote: true }) => break Ok(()),
+                        Err(_) => break Err("Event channel closed".to_string()),
+                        _ => continue,
                     }
-                } => event,
-                err = err_rx => {
-                    Err(err.unwrap_or_else(|_| "Connection task ended unexpectedly".to_string()))
                 }
+            } => event,
+            err = err_rx => {
+                Err(err.unwrap_or_else(|_| "Connection task ended unexpectedly".to_string()))
             }
-        },
-    )
+        }
+    })
     .await;
 
     match result {
         Ok(Ok(())) => {
             let fp = state.fingerprint.read().await.clone();
-            Json(ConnectResponse { success: true, error: None, fingerprint: fp })
+            Json(ConnectResponse {
+                success: true,
+                error: None,
+                fingerprint: fp,
+            })
         }
-        Ok(Err(e)) => {
-            Json(ConnectResponse { success: false, error: Some(e), fingerprint: None })
-        }
+        Ok(Err(e)) => Json(ConnectResponse {
+            success: false,
+            error: Some(e),
+            fingerprint: None,
+        }),
         Err(_) => {
             crate::server::disconnect_remote(&state, false).await;
             Json(ConnectResponse {

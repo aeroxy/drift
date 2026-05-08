@@ -16,14 +16,12 @@ impl ChunkedWriter {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let part_path = path.with_extension(
-            format!(
-                "{}.part",
-                path.extension()
-                    .map(|e| e.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            ),
-        );
+        let part_path = path.with_extension(format!(
+            "{}.part",
+            path.extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default()
+        ));
 
         let (file, bytes_written) = if part_path.exists() {
             let metadata = tokio::fs::metadata(&part_path).await?;
@@ -64,14 +62,12 @@ impl ChunkedWriter {
 
     /// Check how many bytes have already been written for resume support
     pub async fn resume_offset(path: &Path) -> u64 {
-        let part_path = path.with_extension(
-            format!(
-                "{}.part",
-                path.extension()
-                    .map(|e| e.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            ),
-        );
+        let part_path = path.with_extension(format!(
+            "{}.part",
+            path.extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default()
+        ));
         tokio::fs::metadata(&part_path)
             .await
             .map(|m| m.len())

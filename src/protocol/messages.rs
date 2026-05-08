@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Current protocol version. Increment when making backward-incompatible changes.
+/// Version 1: Original format (no file_index in frames)
+/// Version 2: Added file_index to data frames for multi-file transfers
+pub const CURRENT_PROTOCOL_VERSION: u32 = 2;
+pub const MIN_MULTI_FILE_VERSION: u32 = 2;
+
 fn default_destination() -> String {
     ".".to_string()
 }
@@ -10,13 +16,23 @@ fn default_destination() -> String {
 #[serde(tag = "type")]
 pub enum ControlMessage {
     // Handshake
-    KeyExchange { public_key: String },
-    AuthChallenge { nonce: String },
-    AuthResponse { proof: String },
+    KeyExchange {
+        public_key: String,
+        #[serde(default)]
+        protocol_version: Option<u32>,
+    },
+    AuthChallenge {
+        nonce: String,
+    },
+    AuthResponse {
+        proof: String,
+    },
     HandshakeComplete,
 
     // Browsing
-    BrowseRequest { path: String },
+    BrowseRequest {
+        path: String,
+    },
     BrowseResponse {
         hostname: String,
         cwd: String,
@@ -66,7 +82,9 @@ pub enum ControlMessage {
     },
     Ping,
     Pong,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

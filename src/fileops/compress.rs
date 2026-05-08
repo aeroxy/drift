@@ -1,13 +1,17 @@
-use std::path::{Path, PathBuf};
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
+use std::path::{Path, PathBuf};
 use tar::Builder;
 
 /// Compress a directory into a .tar.gz file inside the .drift temp directory.
 /// Returns (archive_path, archive_size).
-pub fn compress_directory(root_dir: &Path, relative_path: &str) -> Result<(PathBuf, u64), CompressError> {
+pub fn compress_directory(
+    root_dir: &Path,
+    relative_path: &str,
+) -> Result<(PathBuf, u64), CompressError> {
     let source = root_dir.join(relative_path);
-    let source = source.canonicalize()
+    let source = source
+        .canonicalize()
         .map_err(|e| CompressError::Io(format!("Failed to resolve path: {}", e)))?;
 
     if !source.is_dir() {
@@ -31,15 +35,19 @@ pub fn compress_directory(root_dir: &Path, relative_path: &str) -> Result<(PathB
 
     // Add directory contents to archive using only the directory's own name as prefix,
     // not the full relative_path (which may include subdirectory prefixes from the sender).
-    let dir_name = source.file_name()
+    let dir_name = source
+        .file_name()
         .ok_or_else(|| CompressError::Io("Invalid directory path".to_string()))?;
-    archive.append_dir_all(dir_name, &source)
+    archive
+        .append_dir_all(dir_name, &source)
         .map_err(|e| CompressError::Io(format!("Failed to archive directory: {}", e)))?;
 
     // Finalize
-    let encoder = archive.into_inner()
+    let encoder = archive
+        .into_inner()
         .map_err(|e| CompressError::Io(format!("Failed to finalize archive: {}", e)))?;
-    encoder.finish()
+    encoder
+        .finish()
         .map_err(|e| CompressError::Io(format!("Failed to finish compression: {}", e)))?;
 
     // Get archive size
@@ -47,7 +55,12 @@ pub fn compress_directory(root_dir: &Path, relative_path: &str) -> Result<(PathB
         .map_err(|e| CompressError::Io(format!("Failed to read archive size: {}", e)))?
         .len();
 
-    tracing::info!("Compressed {} -> {} ({} bytes)", relative_path, archive_path.display(), size);
+    tracing::info!(
+        "Compressed {} -> {} ({} bytes)",
+        relative_path,
+        archive_path.display(),
+        size
+    );
 
     Ok((archive_path, size))
 }

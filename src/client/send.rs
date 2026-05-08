@@ -1,5 +1,5 @@
-use std::path::Path;
 use futures_util::{SinkExt, StreamExt};
+use std::path::Path;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
@@ -7,8 +7,8 @@ use crate::crypto::stream::CryptoStream;
 use crate::fileops::compress;
 use crate::fileops::reader::ChunkedReader;
 use crate::protocol::codec::{
-    encode_data_frame, encode_control_frame, decode_frame_type,
-    FRAME_TYPE_CONTROL,
+    FRAME_TYPE_CONTROL, decode_frame_type, encode_control_frame, encode_data_frame_v1,
+    encode_data_frame_v2,
 };
 use crate::protocol::messages::{ControlMessage, Direction, TransferEntry};
 
@@ -48,8 +48,13 @@ pub async fn send_file(
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
-    tracing::info!("Encrypted connection established (fingerprint: {})", fp);
+    let (crypto, fp, peer_version) =
+        perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    tracing::info!(
+        "Encrypted connection established (fingerprint: {}), peer version: {:?}",
+        fp,
+        peer_version
+    );
 
     let transfer_id = Uuid::new_v4();
     let entry = TransferEntry {
@@ -74,14 +79,16 @@ pub async fn send_file(
     tracing::info!("Transfer request sent, waiting for acceptance...");
 
     loop {
-        let msg = recv_encrypted_control(&crypto, &mut ws_read).await?;
+        let msg = recv_control_with_replies(&crypto, &mut ws_write, &mut ws_read).await?;
         match msg {
             ControlMessage::TransferAccepted { id, .. } if id == transfer_id => {
                 tracing::info!("Transfer accepted");
                 break;
             }
             ControlMessage::TransferError { error, .. } => {
-                if let Some(ref p) = cleanup_path { compress::cleanup_archive(p); }
+                if let Some(ref p) = cleanup_path {
+                    compress::cleanup_archive(p);
+                }
                 anyhow::bail!("Transfer rejected: {}", error);
             }
             _ => continue,
@@ -95,8 +102,13 @@ pub async fn send_file(
 
     tracing::info!("Sending {} ({} bytes)...", file_name, total);
 
+    let use_v2 = peer_version >= Some(crate::protocol::messages::MIN_MULTI_FILE_VERSION);
     while let Some((_offset, chunk)) = reader.read_chunk().await? {
-        let frame = encode_data_frame(transfer_id, sent, &chunk);
+        let frame = if use_v2 {
+            encode_data_frame_v2(transfer_id, 0, sent, &chunk)
+        } else {
+            encode_data_frame_v1(transfer_id, sent, &chunk)
+        };
         let ciphertext = crypto.encrypt(&frame)?;
         ws_write.send(Message::Binary(ciphertext.into())).await?;
 
@@ -104,19 +116,31 @@ pub async fn send_file(
 
         let percent = if total > 0 { sent * 100 / total } else { 100 };
         if percent / 10 > last_percent / 10 {
-            tracing::info!("  {}% ({}/{})", percent, format_bytes(sent), format_bytes(total));
+            tracing::info!(
+                "  {}% ({}/{})",
+                percent,
+                format_bytes(sent),
+                format_bytes(total)
+            );
             last_percent = percent;
         }
     }
 
-    send_encrypted_control(&crypto, &mut ws_write, &ControlMessage::TransferComplete {
-        id: transfer_id,
-        total_bytes: sent,
-    }).await?;
+    send_encrypted_control(
+        &crypto,
+        &mut ws_write,
+        &ControlMessage::TransferComplete {
+            id: transfer_id,
+            total_bytes: sent,
+        },
+    )
+    .await?;
 
     tracing::info!("Transfer complete: {} sent to {}", file_name, target);
 
-    if let Some(ref p) = cleanup_path { compress::cleanup_archive(p); }
+    if let Some(ref p) = cleanup_path {
+        compress::cleanup_archive(p);
+    }
     let _ = ws_write.send(Message::Close(None)).await;
 
     Ok(())
@@ -135,6 +159,39 @@ pub(crate) async fn send_encrypted_control(
     Ok(())
 }
 
+/// Receive one control message, automatically replying to any incoming requests
+/// (InfoRequest, Ping) from the peer. Only returns a non-request message.
+/// Needed because the server sends InfoRequest after handshake (to populate
+/// hostname/root_dir in its RemoteConnection state), and CLI commands must
+/// respond rather than treating it as an unexpected message.
+pub(crate) async fn recv_control_with_replies(
+    crypto: &CryptoStream,
+    ws_write: &mut super::WsWrite,
+    ws_read: &mut super::WsRead,
+) -> anyhow::Result<ControlMessage> {
+    for _ in 0..100 {
+        let msg = recv_encrypted_control(crypto, ws_read).await?;
+        match &msg {
+            ControlMessage::InfoRequest => {
+                send_encrypted_control(
+                    crypto,
+                    ws_write,
+                    &ControlMessage::InfoResponse {
+                        hostname: String::new(),
+                        root_dir: String::new(),
+                    },
+                )
+                .await?;
+            }
+            ControlMessage::Ping => {
+                send_encrypted_control(crypto, ws_write, &ControlMessage::Pong).await?;
+            }
+            _ => return Ok(msg),
+        }
+    }
+    anyhow::bail!("Peer sent too many handshake requests without a response")
+}
+
 /// Receive one encrypted binary frame and parse it as a control message.
 pub(crate) async fn recv_encrypted_control(
     crypto: &CryptoStream,
@@ -146,7 +203,10 @@ pub(crate) async fn recv_encrypted_control(
                 let plaintext = crypto.decrypt(&encrypted)?;
                 let (frame_type, payload) = decode_frame_type(&plaintext)?;
                 if frame_type != FRAME_TYPE_CONTROL {
-                    tracing::warn!("Expected control frame, got type {:#x} — skipping", frame_type);
+                    tracing::warn!(
+                        "Expected control frame, got type {:#x} — skipping",
+                        frame_type
+                    );
                     continue;
                 }
                 let msg: ControlMessage = serde_json::from_slice(payload)?;

@@ -3,8 +3,8 @@ pub mod pull;
 pub mod reconnect;
 pub mod send;
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── WebSocket connection helpers ───────────────────────────────────────────────
 
@@ -18,7 +18,11 @@ pub(crate) fn build_ws_url(target: &str) -> String {
         format!("ws://{}", target)
     };
     let trimmed = with_scheme.trim_end_matches('/').to_string();
-    if trimmed.ends_with("/ws") { trimmed } else { format!("{}/ws", trimmed) }
+    if trimmed.ends_with("/ws") {
+        trimmed
+    } else {
+        format!("{}/ws", trimmed)
+    }
 }
 
 /// Connect, applying TLS settings if the URL uses wss://.
@@ -39,7 +43,10 @@ pub(crate) async fn open_ws(
         } else {
             build_secure_rustls_connector()?
         };
-        Ok(tokio_tungstenite::connect_async_tls_with_config(&url, None, true, Some(connector)).await?)
+        Ok(
+            tokio_tungstenite::connect_async_tls_with_config(&url, None, true, Some(connector))
+                .await?,
+        )
     } else {
         Ok(tokio_tungstenite::connect_async(&url).await?)
     }
@@ -55,7 +62,9 @@ fn build_secure_rustls_connector() -> anyhow::Result<tokio_tungstenite::Connecto
         .with_root_certificates(root_store)
         .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+    Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+        config,
+    )))
 }
 
 /// rustls ClientConfig with certificate verification disabled (for self-signed certs).
@@ -66,7 +75,9 @@ fn build_insecure_rustls_connector() -> anyhow::Result<tokio_tungstenite::Connec
         .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerifier))
         .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+    Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+        config,
+    )))
 }
 
 #[derive(Debug)]
@@ -126,22 +137,34 @@ mod tests {
     #[test]
     fn test_build_ws_url() {
         assert_eq!(build_ws_url("192.168.0.2:8000"), "ws://192.168.0.2:8000/ws");
-        assert_eq!(build_ws_url("ws://192.168.0.2:8000"), "ws://192.168.0.2:8000/ws");
+        assert_eq!(
+            build_ws_url("ws://192.168.0.2:8000"),
+            "ws://192.168.0.2:8000/ws"
+        );
         assert_eq!(build_ws_url("wss://example.com"), "wss://example.com/ws");
         assert_eq!(build_ws_url("wss://example.com/"), "wss://example.com/ws");
-        assert_eq!(build_ws_url("wss://example.com/drift"), "wss://example.com/drift/ws");
-        assert_eq!(build_ws_url("wss://example.com/drift/ws"), "wss://example.com/drift/ws");
+        assert_eq!(
+            build_ws_url("wss://example.com/drift"),
+            "wss://example.com/drift/ws"
+        );
+        assert_eq!(
+            build_ws_url("wss://example.com/drift/ws"),
+            "wss://example.com/drift/ws"
+        );
     }
 }
-use crate::crypto::{handshake::{KeyPair, decode_public_key, derive_shared_secret}, stream::CryptoStream};
-use crate::protocol::messages::ControlMessage;
-use crate::protocol::codec::{
-    decode_frame_type, decode_data_frame, encode_control_frame,
-    FRAME_TYPE_DATA, FRAME_TYPE_CONTROL,
+use crate::crypto::{
+    handshake::{KeyPair, decode_public_key, derive_shared_secret},
+    stream::CryptoStream,
 };
+use crate::protocol::codec::{
+    FRAME_TYPE_CONTROL, FRAME_TYPE_DATA, FRAME_TYPE_DATA_V2, decode_data_frame, decode_frame_type,
+    encode_control_frame,
+};
+use crate::protocol::messages::{CURRENT_PROTOCOL_VERSION, ControlMessage};
 use crate::server::{AppState, RemoteConnection, ResponseChannel};
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
@@ -160,7 +183,12 @@ pub(crate) type WsRead = futures_util::stream::SplitStream<
 #[allow(dead_code)]
 pub(crate) enum DecryptedFrame {
     Control(ControlMessage),
-    Data { transfer_id: Uuid, offset: u64, chunk: Vec<u8> },
+    Data {
+        transfer_id: Uuid,
+        file_index: u32,
+        offset: u64,
+        chunk: Vec<u8>,
+    },
 }
 
 /// Receive and decrypt the next binary WebSocket frame, returning either a data or control frame.
@@ -174,10 +202,12 @@ pub(crate) async fn recv_encrypted_frame(
                 let plaintext = crypto.decrypt(&encrypted)?;
                 let (frame_type, payload) = decode_frame_type(&plaintext)?;
                 match frame_type {
-                    FRAME_TYPE_DATA => {
-                        let (id, offset, chunk) = decode_data_frame(payload)?;
+                    FRAME_TYPE_DATA | FRAME_TYPE_DATA_V2 => {
+                        let (id, file_index, offset, chunk) =
+                            decode_data_frame(payload, frame_type)?;
                         return Ok(DecryptedFrame::Data {
                             transfer_id: id,
+                            file_index,
                             offset,
                             chunk: chunk.to_vec(),
                         });
@@ -208,8 +238,13 @@ pub async fn connect_to_remote(
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    let (crypto, fp) = perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
-    tracing::info!("Handshake complete, connection encrypted (fingerprint: {})", fp);
+    let (crypto, fp, peer_version) =
+        perform_client_handshake(&mut ws_write, &mut ws_read, password).await?;
+    tracing::info!(
+        "Handshake complete, connection encrypted (fingerprint: {}), peer version: {:?}",
+        fp,
+        peer_version
+    );
     *state.fingerprint.write().await = Some(fp);
 
     // Remember credentials for FE Reconnect button. Only stored once the
@@ -223,7 +258,8 @@ pub async fn connect_to_remote(
     let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     // Separate request channel for forwarded browser API requests
-    let (request_tx, mut request_rx) = mpsc::unbounded_channel::<(ControlMessage, ResponseChannel)>();
+    let (request_tx, mut request_rx) =
+        mpsc::unbounded_channel::<(ControlMessage, ResponseChannel)>();
 
     let pending = Arc::new(Mutex::new(HashMap::<Uuid, ResponseChannel>::new()));
     let pending_request = pending.clone();
@@ -249,7 +285,11 @@ pub async fn connect_to_remote(
         while let Some(frame) = frame_rx.recv().await {
             match crypto_write.encrypt(&frame) {
                 Ok(ciphertext) => {
-                    if ws_write.send(Message::Binary(ciphertext.into())).await.is_err() {
+                    if ws_write
+                        .send(Message::Binary(ciphertext.into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -268,26 +308,37 @@ pub async fn connect_to_remote(
                 Message::Binary(encrypted_data) => {
                     let plaintext = match crypto_read.decrypt(&encrypted_data) {
                         Ok(p) => p,
-                        Err(e) => { tracing::error!("Decryption failed: {}", e); break; }
+                        Err(e) => {
+                            tracing::error!("Decryption failed: {}", e);
+                            break;
+                        }
                     };
 
                     let (frame_type, payload) = match decode_frame_type(&plaintext) {
                         Ok(v) => v,
-                        Err(e) => { tracing::error!("Frame decode failed: {}", e); break; }
+                        Err(e) => {
+                            tracing::error!("Frame decode failed: {}", e);
+                            break;
+                        }
                     };
 
                     match frame_type {
-                        FRAME_TYPE_DATA => {
-                            match decode_data_frame(payload) {
-                                Ok((transfer_id, offset, chunk)) => {
-                                    match state_read.transfer_receiver
-                                        .receive_chunk(transfer_id, offset, chunk).await
+                        FRAME_TYPE_DATA | FRAME_TYPE_DATA_V2 => {
+                            match decode_data_frame(payload, frame_type) {
+                                Ok((transfer_id, file_index, offset, chunk)) => {
+                                    match state_read
+                                        .transfer_receiver
+                                        .receive_chunk(transfer_id, file_index, offset, chunk)
+                                        .await
                                     {
                                         Ok(true) => {
                                             // Auto-finalized — send TransferFinalized back
-                                            let msg = ControlMessage::TransferFinalized { id: transfer_id };
+                                            let msg = ControlMessage::TransferFinalized {
+                                                id: transfer_id,
+                                            };
                                             let json = serde_json::to_string(&msg).unwrap();
-                                            let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                            let _ = frame_tx_read
+                                                .send(encode_control_frame(json.as_bytes()));
                                         }
                                         Ok(false) => {}
                                         Err(e) => {
@@ -302,22 +353,34 @@ pub async fn connect_to_remote(
                             }
                         }
                         FRAME_TYPE_CONTROL => {
-                            let control_msg = match serde_json::from_slice::<ControlMessage>(payload) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    tracing::error!("Failed to parse control message: {}", e);
-                                    continue;
-                                }
-                            };
+                            let control_msg =
+                                match serde_json::from_slice::<ControlMessage>(payload) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        tracing::error!("Failed to parse control message: {}", e);
+                                        continue;
+                                    }
+                                };
 
-                            if let ControlMessage::TransferComplete { id, total_bytes } = control_msg {
-                                tracing::info!("Received TransferComplete from server: {} ({} bytes)", id, total_bytes);
-                                match state_read.transfer_receiver.signal_completion(id, total_bytes).await {
+                            if let ControlMessage::TransferComplete { id, total_bytes } =
+                                control_msg
+                            {
+                                tracing::info!(
+                                    "Received TransferComplete from server: {} ({} bytes)",
+                                    id,
+                                    total_bytes
+                                );
+                                match state_read
+                                    .transfer_receiver
+                                    .signal_completion(id, total_bytes)
+                                    .await
+                                {
                                     Ok(true) => {
                                         // Finalized — send TransferFinalized back
                                         let msg = ControlMessage::TransferFinalized { id };
                                         let json = serde_json::to_string(&msg).unwrap();
-                                        let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                        let _ = frame_tx_read
+                                            .send(encode_control_frame(json.as_bytes()));
                                     }
                                     Ok(false) => {
                                         // Waiting for remaining chunks; they will auto-finalize
@@ -339,10 +402,16 @@ pub async fn connect_to_remote(
                             }
 
                             if control_msg.is_request() {
-                                tracing::debug!("Client handling request from server: {:?}", control_msg);
-                                if let Some(response) = handle_incoming_request(&state_read.clone(), control_msg).await {
+                                tracing::debug!(
+                                    "Client handling request from server: {:?}",
+                                    control_msg
+                                );
+                                if let Some(response) =
+                                    handle_incoming_request(&state_read.clone(), control_msg).await
+                                {
                                     let json = serde_json::to_string(&response).unwrap();
-                                    let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                    let _ =
+                                        frame_tx_read.send(encode_control_frame(json.as_bytes()));
                                 }
                             } else {
                                 let mut pending_lock = pending_read.lock().await;
@@ -379,13 +448,19 @@ pub async fn connect_to_remote(
                 write_handle.abort_handle(),
                 read_handle.abort_handle(),
             ],
+            peer_version,
         });
     }
-    let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: true });
+    let _ = state
+        .browser_events
+        .send(ControlMessage::ConnectionStatus { has_remote: true });
 
     // Send InfoRequest to get remote hostname and root_dir
     let (info_tx, info_rx) = tokio::sync::oneshot::channel();
-    if request_tx.send((ControlMessage::InfoRequest, info_tx)).is_ok() {
+    if request_tx
+        .send((ControlMessage::InfoRequest, info_tx))
+        .is_ok()
+    {
         if let Ok(Ok(ControlMessage::InfoResponse { hostname, root_dir })) =
             tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await
         {
@@ -406,7 +481,9 @@ pub async fn connect_to_remote(
         let mut remote = state.remote.write().await;
         *remote = None;
     }
-    let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: false });
+    let _ = state
+        .browser_events
+        .send(ControlMessage::ConnectionStatus { has_remote: false });
 
     Ok(())
 }
@@ -419,42 +496,69 @@ async fn handle_incoming_request(
         ControlMessage::BrowseRequest { path } => {
             match crate::fileops::browse::list_directory(&state.config.root_dir, &path) {
                 Ok(entries) => {
-                    let cwd = state.config.root_dir.join(&path)
+                    let cwd = state
+                        .config
+                        .root_dir
+                        .join(&path)
                         .canonicalize()
                         .unwrap_or_else(|_| state.config.root_dir.clone())
-                        .to_string_lossy().to_string();
+                        .to_string_lossy()
+                        .to_string();
                     Some(ControlMessage::BrowseResponse {
                         hostname: state.config.hostname.clone(),
                         cwd,
                         entries,
                     })
                 }
-                Err(e) => Some(ControlMessage::Error { message: e.to_string() }),
+                Err(e) => Some(ControlMessage::Error {
+                    message: e.to_string(),
+                }),
             }
         }
         ControlMessage::InfoRequest => Some(ControlMessage::InfoResponse {
             hostname: state.config.hostname.clone(),
             root_dir: state.config.root_dir.to_string_lossy().to_string(),
         }),
-        ControlMessage::TransferRequest { id, entries, direction, destination_path } => {
-            tracing::info!("Client received TransferRequest from server: id={}, entries={}, direction={:?}, dest={}", id, entries.len(), direction, destination_path);
+        ControlMessage::TransferRequest {
+            id,
+            entries,
+            direction,
+            destination_path,
+        } => {
+            tracing::info!(
+                "Client received TransferRequest from server: id={}, entries={}, direction={:?}, dest={}",
+                id,
+                entries.len(),
+                direction,
+                destination_path
+            );
 
             use crate::protocol::messages::Direction;
             match direction {
                 Direction::Push => {
-                    state.transfer_receiver.start_transfer(id, entries.clone(), destination_path).await;
+                    state
+                        .transfer_receiver
+                        .start_transfer(id, entries.clone(), destination_path)
+                        .await;
                     Some(ControlMessage::TransferAccepted {
                         id,
                         resume_offsets: std::collections::HashMap::new(),
                     })
                 }
                 Direction::Pull => {
-                    tracing::info!("Accepting pull transfer from server, will send {} entries", entries.len());
+                    tracing::info!(
+                        "Accepting pull transfer from server, will send {} entries",
+                        entries.len()
+                    );
 
-                    let frame_tx = {
+                    let (frame_tx, peer_version) = {
                         let remote = state.remote.read().await;
-                        remote.as_ref().map(|r| r.frame_tx.clone())
+                        remote
+                            .as_ref()
+                            .map(|r| (r.frame_tx.clone(), r.peer_version))
+                            .unzip()
                     };
+                    let peer_version = peer_version.flatten();
 
                     let Some(frame_tx) = frame_tx else {
                         return Some(ControlMessage::TransferError {
@@ -466,8 +570,13 @@ async fn handle_incoming_request(
                     let root_dir = state.config.root_dir.clone();
                     tokio::spawn(async move {
                         crate::server::browser_transfer::send_entries(
-                            &root_dir, id, &entries, &frame_tx,
-                        ).await;
+                            &root_dir,
+                            id,
+                            &entries,
+                            &frame_tx,
+                            peer_version,
+                        )
+                        .await;
                     });
 
                     Some(ControlMessage::TransferAccepted {
@@ -483,16 +592,29 @@ async fn handle_incoming_request(
 }
 
 pub async fn perform_client_handshake(
-    ws_write: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>,
-    ws_read: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+    ws_write: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Message,
+    >,
+    ws_read: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
     password: &Option<String>,
-) -> anyhow::Result<(CryptoStream, String)> {
+) -> anyhow::Result<(CryptoStream, String, Option<u32>)> {
     let client_keypair = KeyPair::generate();
 
-    let server_public = match ws_read.next().await {
+    let (server_public, peer_version) = match ws_read.next().await {
         Some(Ok(Message::Text(text))) => {
-            if let Ok(ControlMessage::KeyExchange { public_key }) = serde_json::from_str(&text) {
-                decode_public_key(&public_key)?
+            if let Ok(ControlMessage::KeyExchange {
+                public_key,
+                protocol_version,
+            }) = serde_json::from_str(&text)
+            {
+                (decode_public_key(&public_key)?, protocol_version)
             } else {
                 anyhow::bail!("Expected KeyExchange message from server");
             }
@@ -502,6 +624,7 @@ pub async fn perform_client_handshake(
 
     let msg = ControlMessage::KeyExchange {
         public_key: client_keypair.public_key_base64(),
+        protocol_version: Some(CURRENT_PROTOCOL_VERSION),
     };
     let json = serde_json::to_string(&msg)?;
     ws_write.send(Message::Text(json.into())).await?;
@@ -514,18 +637,21 @@ pub async fn perform_client_handshake(
             let msg: ControlMessage = serde_json::from_str(&text)?;
             match msg {
                 ControlMessage::AuthChallenge { nonce } => {
-                    let password = password.as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("Server requires a password (use --password)"))?;
+                    let password = password.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Server requires a password (use --password)")
+                    })?;
 
-                    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
                     use crate::crypto::handshake::create_auth_proof;
+                    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
                     let nonce_bytes = BASE64.decode(&nonce)?;
                     let proof = create_auth_proof(password, &nonce_bytes, &shared_secret);
                     let response = ControlMessage::AuthResponse {
                         proof: BASE64.encode(&proof),
                     };
-                    ws_write.send(Message::Text(serde_json::to_string(&response)?.into())).await?;
+                    ws_write
+                        .send(Message::Text(serde_json::to_string(&response)?.into()))
+                        .await?;
 
                     // Now wait for HandshakeComplete or Error
                     match ws_read.next().await {
@@ -544,7 +670,9 @@ pub async fn perform_client_handshake(
                 }
                 ControlMessage::HandshakeComplete => {
                     if password.is_some() {
-                        tracing::warn!("Connected without authentication — server has no password set");
+                        tracing::warn!(
+                            "Connected without authentication — server has no password set"
+                        );
                     }
                 }
                 ControlMessage::Error { message } => {
@@ -557,5 +685,9 @@ pub async fn perform_client_handshake(
     }
 
     let fp = crate::crypto::handshake::fingerprint(&shared_secret);
-    Ok((CryptoStream::from_shared_secret(&shared_secret, false), fp))
+    Ok((
+        CryptoStream::from_shared_secret(&shared_secret, false),
+        fp,
+        peer_version,
+    ))
 }

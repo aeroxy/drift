@@ -1,5 +1,5 @@
-mod config;
 mod client;
+mod config;
 mod crypto;
 mod fileops;
 mod frontend;
@@ -108,25 +108,64 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Send { target, path, password, allow_insecure_tls }) => {
-            client::send::send_file(&target, &path, &password, allow_insecure_tls).await
+        Some(Commands::Send {
+            target,
+            path,
+            password,
+            allow_insecure_tls,
+        }) => client::send::send_file(&target, &path, &password, allow_insecure_tls).await,
+        Some(Commands::Ls {
+            target,
+            path,
+            password,
+            allow_insecure_tls,
+        }) => {
+            client::browse::browse_remote(&target, path.as_deref(), &password, allow_insecure_tls)
+                .await
         }
-        Some(Commands::Ls { target, path, password, allow_insecure_tls }) => {
-            client::browse::browse_remote(&target, path.as_deref(), &password, allow_insecure_tls).await
-        }
-        Some(Commands::Pull { target, remote_path, output, password, allow_insecure_tls }) => {
-            client::pull::pull_remote(&target, &remote_path, output.as_deref(), &password, allow_insecure_tls).await
+        Some(Commands::Pull {
+            target,
+            remote_path,
+            output,
+            password,
+            allow_insecure_tls,
+        }) => {
+            client::pull::pull_remote(
+                &target,
+                &remote_path,
+                output.as_deref(),
+                &password,
+                allow_insecure_tls,
+            )
+            .await
         }
         None => {
-            if cli.daemon { return start_daemon(); }
-
-            if let Some(ref file_path) = cli.file {
-                let target = cli.target.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("--file requires --target"))?;
-                return client::send::send_file(target, file_path, &cli.password, cli.allow_insecure_tls).await;
+            if cli.daemon {
+                return start_daemon();
             }
 
-            run_server(cli.port, cli.target, cli.password, cli.allow_insecure_tls, cli.disable_ui).await
+            if let Some(ref file_path) = cli.file {
+                let target = cli
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("--file requires --target"))?;
+                return client::send::send_file(
+                    target,
+                    file_path,
+                    &cli.password,
+                    cli.allow_insecure_tls,
+                )
+                .await;
+            }
+
+            run_server(
+                cli.port,
+                cli.target,
+                cli.password,
+                cli.allow_insecure_tls,
+                cli.disable_ui,
+            )
+            .await
         }
     }
 }
@@ -134,10 +173,13 @@ async fn main() -> anyhow::Result<()> {
 fn start_daemon() -> anyhow::Result<()> {
     let log_path = std::env::current_dir()?.join("drift.log");
     let log_file = std::fs::OpenOptions::new()
-        .create(true).append(true).open(&log_path)?;
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
 
     let exe = std::env::current_exe()?;
-    let args: Vec<String> = std::env::args().skip(1)
+    let args: Vec<String> = std::env::args()
+        .skip(1)
         .filter(|a| a != "--daemon")
         .collect();
 
@@ -190,7 +232,9 @@ async fn run_server(
         let state_clone = state.clone();
         let password = config.password.clone();
         tokio::spawn(async move {
-            if let Err(e) = client::connect_to_remote(&target, &password, allow_insecure_tls, state_clone).await {
+            if let Err(e) =
+                client::connect_to_remote(&target, &password, allow_insecure_tls, state_clone).await
+            {
                 tracing::error!("Failed to connect to remote: {}", e);
             }
         });

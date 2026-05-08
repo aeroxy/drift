@@ -1,19 +1,16 @@
-pub mod file_api;
-pub mod ws_handler;
-pub mod transfer_handler;
 pub mod browser_transfer;
+pub mod file_api;
+pub mod transfer_handler;
 pub mod transfer_receiver;
+pub mod ws_handler;
 
 use crate::config::AppConfig;
 use crate::frontend::static_handler;
 use crate::protocol::messages::ControlMessage;
-use axum::{
-    Router,
-    routing::get,
-};
+use axum::{Router, routing::get};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
@@ -55,6 +52,8 @@ pub struct RemoteConnection {
     /// Abort handles for all tasks driving this connection (read, write, request handler).
     /// Aborting these cleanly tears down the connection from either side.
     pub task_handles: Vec<tokio::task::AbortHandle>,
+    /// Protocol version of the peer (None if unknown/old version).
+    pub peer_version: Option<u32>,
 }
 
 impl AppState {
@@ -95,7 +94,9 @@ pub async fn disconnect_remote(state: &AppState, clear_creds: bool) {
         *state.last_target.write().await = None;
         *state.last_password.write().await = None;
     }
-    let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: false });
+    let _ = state
+        .browser_events
+        .send(ControlMessage::ConnectionStatus { has_remote: false });
 }
 
 pub async fn run(state: Arc<AppState>, port: Option<u16>) -> anyhow::Result<()> {

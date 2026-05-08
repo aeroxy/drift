@@ -17,8 +17,7 @@ pub fn list_directory(root: &Path, relative: &str) -> Result<Vec<FileEntry>, Bro
     }
 
     let mut entries = Vec::new();
-    let read_dir = std::fs::read_dir(&canonical)
-        .map_err(|e| BrowseError::Io(e.to_string()))?;
+    let read_dir = std::fs::read_dir(&canonical).map_err(|e| BrowseError::Io(e.to_string()))?;
 
     for entry in read_dir {
         let entry = entry.map_err(|e| BrowseError::Io(e.to_string()))?;
@@ -29,7 +28,9 @@ pub fn list_directory(root: &Path, relative: &str) -> Result<Vec<FileEntry>, Bro
             continue;
         }
 
-        let metadata = entry.metadata().map_err(|e| BrowseError::Io(e.to_string()))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|e| BrowseError::Io(e.to_string()))?;
 
         let modified = metadata
             .modified()
@@ -56,7 +57,9 @@ pub fn list_directory(root: &Path, relative: &str) -> Result<Vec<FileEntry>, Bro
 
     // Sort: directories first, then alphabetical
     entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
     Ok(entries)

@@ -1,19 +1,22 @@
 use axum::{
-    extract::{State, ws::{Message, WebSocket, WebSocketUpgrade}},
+    extract::{
+        State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
 use std::collections::HashMap;
-use tokio::sync::{mpsc, Mutex};
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
-use crate::protocol::messages::ControlMessage;
 use crate::protocol::codec::{
-    decode_frame_type, decode_data_frame, encode_control_frame,
-    FRAME_TYPE_DATA, FRAME_TYPE_CONTROL,
+    FRAME_TYPE_CONTROL, FRAME_TYPE_DATA, FRAME_TYPE_DATA_V2, decode_data_frame, decode_frame_type,
+    encode_control_frame,
 };
-use crate::server::{AppState, browser_transfer, RemoteConnection, ResponseChannel};
+use crate::protocol::messages::{CURRENT_PROTOCOL_VERSION, ControlMessage};
+use crate::server::{AppState, RemoteConnection, ResponseChannel, browser_transfer};
 
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
@@ -32,8 +35,15 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     let server_keypair = KeyPair::generate();
     let key_exchange = ControlMessage::KeyExchange {
         public_key: server_keypair.public_key_base64(),
+        protocol_version: Some(CURRENT_PROTOCOL_VERSION),
     };
-    if sender.send(Message::Text(serde_json::to_string(&key_exchange).unwrap().into())).await.is_err() {
+    if sender
+        .send(Message::Text(
+            serde_json::to_string(&key_exchange).unwrap().into(),
+        ))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -44,16 +54,29 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     };
 
     // KeyExchange response → server-to-server encrypted connection
-    if let Ok(ControlMessage::KeyExchange { public_key }) = serde_json::from_str(&first_msg) {
-        tracing::info!("Server-to-server connection detected, completing handshake");
+    if let Ok(ControlMessage::KeyExchange {
+        public_key,
+        protocol_version,
+    }) = serde_json::from_str(&first_msg)
+    {
+        let peer_version = protocol_version;
+        tracing::info!(
+            "Server-to-server connection detected, completing handshake (peer version: {:?})",
+            peer_version
+        );
 
-        use crate::crypto::handshake::{decode_public_key, derive_shared_secret, fingerprint, generate_nonce, verify_auth_proof};
+        use crate::crypto::handshake::{
+            decode_public_key, derive_shared_secret, fingerprint, generate_nonce, verify_auth_proof,
+        };
         use crate::crypto::stream::CryptoStream;
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
         let client_public = match decode_public_key(&public_key) {
             Ok(pk) => pk,
-            Err(e) => { tracing::error!("Invalid public key: {}", e); return; }
+            Err(e) => {
+                tracing::error!("Invalid public key: {}", e);
+                return;
+            }
         };
 
         let shared_secret = derive_shared_secret(server_keypair.secret, &client_public);
@@ -65,24 +88,50 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             let challenge = ControlMessage::AuthChallenge {
                 nonce: BASE64.encode(&nonce),
             };
-            if sender.send(Message::Text(serde_json::to_string(&challenge).unwrap().into())).await.is_err() {
+            if sender
+                .send(Message::Text(
+                    serde_json::to_string(&challenge).unwrap().into(),
+                ))
+                .await
+                .is_err()
+            {
                 return;
             }
 
             let proof_bytes = match receiver.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(ControlMessage::AuthResponse { proof }) = serde_json::from_str(&text) {
+                    if let Ok(ControlMessage::AuthResponse { proof }) = serde_json::from_str(&text)
+                    {
                         match BASE64.decode(&proof) {
                             Ok(bytes) => bytes,
                             Err(_) => {
                                 tracing::error!("Invalid auth proof encoding");
-                                let _ = sender.send(Message::Text(serde_json::to_string(&ControlMessage::Error { message: "authentication failed".into() }).unwrap().into())).await;
+                                let _ = sender
+                                    .send(Message::Text(
+                                        serde_json::to_string(&ControlMessage::Error {
+                                            message: "authentication failed".into(),
+                                        })
+                                        .unwrap()
+                                        .into(),
+                                    ))
+                                    .await;
                                 return;
                             }
                         }
                     } else {
-                        tracing::error!("Expected AuthResponse, got: {}", &text[..text.len().min(100)]);
-                        let _ = sender.send(Message::Text(serde_json::to_string(&ControlMessage::Error { message: "authentication failed".into() }).unwrap().into())).await;
+                        tracing::error!(
+                            "Expected AuthResponse, got: {}",
+                            &text[..text.len().min(100)]
+                        );
+                        let _ = sender
+                            .send(Message::Text(
+                                serde_json::to_string(&ControlMessage::Error {
+                                    message: "authentication failed".into(),
+                                })
+                                .unwrap()
+                                .into(),
+                            ))
+                            .await;
                         return;
                     }
                 }
@@ -94,19 +143,38 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
             if !verify_auth_proof(password, &nonce, &shared_secret, &proof_bytes) {
                 tracing::error!("Authentication failed: invalid password");
-                let _ = sender.send(Message::Text(serde_json::to_string(&ControlMessage::Error { message: "authentication failed".into() }).unwrap().into())).await;
+                let _ = sender
+                    .send(Message::Text(
+                        serde_json::to_string(&ControlMessage::Error {
+                            message: "authentication failed".into(),
+                        })
+                        .unwrap()
+                        .into(),
+                    ))
+                    .await;
                 return;
             }
 
             tracing::info!("Password authentication successful");
         }
 
-        if sender.send(Message::Text(serde_json::to_string(&ControlMessage::HandshakeComplete).unwrap().into())).await.is_err() {
+        if sender
+            .send(Message::Text(
+                serde_json::to_string(&ControlMessage::HandshakeComplete)
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .is_err()
+        {
             return;
         }
 
         let fp = fingerprint(&shared_secret);
-        tracing::info!("Handshake complete, encrypted connection established (fingerprint: {})", fp);
+        tracing::info!(
+            "Handshake complete, encrypted connection established (fingerprint: {})",
+            fp
+        );
         *state.fingerprint.write().await = Some(fp);
 
         // Single unified outbound channel: pre-encoded frames (type byte + payload).
@@ -115,7 +183,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
         // Separate request channel for browser-forwarded requests needing responses
-        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<(ControlMessage, ResponseChannel)>();
+        let (request_tx, mut request_rx) =
+            mpsc::unbounded_channel::<(ControlMessage, ResponseChannel)>();
 
         let pending = Arc::new(Mutex::new(HashMap::<Uuid, ResponseChannel>::new()));
         let pending_request = pending.clone();
@@ -142,7 +211,11 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             while let Some(frame) = frame_rx.recv().await {
                 match crypto_write.encrypt(&frame) {
                     Ok(ciphertext) => {
-                        if sender.send(Message::Binary(ciphertext.into())).await.is_err() {
+                        if sender
+                            .send(Message::Binary(ciphertext.into()))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -161,26 +234,41 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     Message::Binary(encrypted_data) => {
                         let plaintext = match crypto_read.decrypt(&encrypted_data) {
                             Ok(p) => p,
-                            Err(e) => { tracing::error!("Decryption failed: {}", e); break; }
+                            Err(e) => {
+                                tracing::error!("Decryption failed: {}", e);
+                                break;
+                            }
                         };
 
                         let (frame_type, payload) = match decode_frame_type(&plaintext) {
                             Ok(v) => v,
-                            Err(e) => { tracing::error!("Frame decode failed: {}", e); break; }
+                            Err(e) => {
+                                tracing::error!("Frame decode failed: {}", e);
+                                break;
+                            }
                         };
 
                         match frame_type {
-                            FRAME_TYPE_DATA => {
-                                match decode_data_frame(payload) {
-                                    Ok((transfer_id, offset, chunk)) => {
-                                        match state_read.transfer_receiver
-                                            .receive_chunk(transfer_id, offset, chunk).await
+                            FRAME_TYPE_DATA | FRAME_TYPE_DATA_V2 => {
+                                match decode_data_frame(payload, frame_type) {
+                                    Ok((transfer_id, file_index, offset, chunk)) => {
+                                        match state_read
+                                            .transfer_receiver
+                                            .receive_chunk(transfer_id, file_index, offset, chunk)
+                                            .await
                                         {
                                             Ok(true) => {
-                                                // Auto-finalized — send TransferFinalized back
-                                                let msg = ControlMessage::TransferFinalized { id: transfer_id };
+                                                tracing::info!(
+                                                    "WS_HANDLER: Sending TransferFinalized for {}",
+                                                    transfer_id
+                                                );
+                                                // Finalized — send TransferFinalized back
+                                                let msg = ControlMessage::TransferFinalized {
+                                                    id: transfer_id,
+                                                };
                                                 let json = serde_json::to_string(&msg).unwrap();
-                                                let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                                let _ = frame_tx_read
+                                                    .send(encode_control_frame(json.as_bytes()));
                                             }
                                             Ok(false) => {}
                                             Err(e) => {
@@ -195,22 +283,37 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                 }
                             }
                             FRAME_TYPE_CONTROL => {
-                                let control_msg = match serde_json::from_slice::<ControlMessage>(payload) {
-                                    Ok(m) => m,
-                                    Err(e) => {
-                                        tracing::error!("Failed to parse control message: {}", e);
-                                        continue;
-                                    }
-                                };
+                                let control_msg =
+                                    match serde_json::from_slice::<ControlMessage>(payload) {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to parse control message: {}",
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                    };
 
-                                if let ControlMessage::TransferComplete { id, total_bytes } = control_msg {
-                                    tracing::info!("Received TransferComplete: {} ({} bytes)", id, total_bytes);
-                                    match state_read.transfer_receiver.signal_completion(id, total_bytes).await {
+                                if let ControlMessage::TransferComplete { id, total_bytes } =
+                                    control_msg
+                                {
+                                    tracing::info!(
+                                        "Received TransferComplete: {} ({} bytes)",
+                                        id,
+                                        total_bytes
+                                    );
+                                    match state_read
+                                        .transfer_receiver
+                                        .signal_completion(id, total_bytes)
+                                        .await
+                                    {
                                         Ok(true) => {
                                             // Finalized — send TransferFinalized back
                                             let msg = ControlMessage::TransferFinalized { id };
                                             let json = serde_json::to_string(&msg).unwrap();
-                                            let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                            let _ = frame_tx_read
+                                                .send(encode_control_frame(json.as_bytes()));
                                         }
                                         Ok(false) => {
                                             // Waiting for remaining chunks; they will auto-finalize
@@ -232,10 +335,19 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                 }
 
                                 if control_msg.is_request() {
-                                    tracing::debug!("Server handling request from client: {:?}", control_msg);
-                                    if let Some(response) = handle_server_to_server_request(&state_read.clone(), control_msg).await {
+                                    tracing::debug!(
+                                        "Server handling request from client: {:?}",
+                                        control_msg
+                                    );
+                                    if let Some(response) = handle_server_to_server_request(
+                                        &state_read.clone(),
+                                        control_msg,
+                                    )
+                                    .await
+                                    {
                                         let json = serde_json::to_string(&response).unwrap();
-                                        let _ = frame_tx_read.send(encode_control_frame(json.as_bytes()));
+                                        let _ = frame_tx_read
+                                            .send(encode_control_frame(json.as_bytes()));
                                     }
                                 } else {
                                     // Response to one of our outgoing requests
@@ -260,9 +372,23 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             }
         });
 
-        // Store remote connection (with abort handles for all tasks)
-        {
+        // Save any existing remote before overwriting.  This incoming connection
+        // may be either the primary peer (--target / /api/connect) or a transient
+        // CLI tool (ls / pull / send).  Both are server-to-server encrypted; the
+        // only way to distinguish them is by checking whether state.remote is
+        // already occupied.
+        //
+        // We *must* save-and-restore rather than skipping the overwrite, because
+        // the server-to-server request handler (handle_server_to_server_request)
+        // reads state.remote.frame_tx to route Pull data frames back to the
+        // requester.  If we left the original peer's frame_tx in place, Pull data
+        // would be sent to the wrong connection.
+        //
+        // The swap is done under a single write-lock so there is no window where
+        // state.remote is None — browser requests are never left without a peer.
+        let previous_remote = {
             let mut remote = state.remote.write().await;
+            let prev = remote.take();
             *remote = Some(RemoteConnection {
                 hostname: "remote".to_string(),
                 root_dir: "/".to_string(),
@@ -273,13 +399,20 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     write_handle.abort_handle(),
                     read_handle.abort_handle(),
                 ],
+                peer_version,
             });
-        }
-        let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: true });
+            prev
+        };
+        let _ = state
+            .browser_events
+            .send(ControlMessage::ConnectionStatus { has_remote: true });
 
         // Send InfoRequest to get client's hostname and root_dir
         let (info_tx, info_rx) = tokio::sync::oneshot::channel();
-        if request_tx.send((ControlMessage::InfoRequest, info_tx)).is_ok() {
+        if request_tx
+            .send((ControlMessage::InfoRequest, info_tx))
+            .is_ok()
+        {
             let state_clone = state.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(ControlMessage::InfoResponse { hostname, root_dir })) =
@@ -299,12 +432,29 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             _ = read_handle => {},
         }
 
+        // Restore the previous remote if one existed.  This connection was
+        // transient (CLI tool) and must not leave state.remote = None, which
+        // would break subsequent browser requests that forward through the
+        // persistent peer link.
+        let had_previous_remote = previous_remote.is_some();
         {
             let mut remote = state.remote.write().await;
-            *remote = None;
+            if let Some(prev) = previous_remote {
+                *remote = Some(prev);
+            } else {
+                *remote = None;
+            }
         }
-        *state.fingerprint.write().await = None;
-        let _ = state.browser_events.send(ControlMessage::ConnectionStatus { has_remote: false });
+        // Only clear the fingerprint when the persistent peer itself disconnected.
+        // If we're restoring a prior connection, the fingerprint for that peer
+        // must remain so the browser UI continues to show it.
+        if !had_previous_remote {
+            *state.fingerprint.write().await = None;
+        }
+        let has_remote = state.remote.read().await.is_some();
+        let _ = state
+            .browser_events
+            .send(ControlMessage::ConnectionStatus { has_remote });
 
         tracing::info!("Server-to-server connection closed");
         return;
@@ -345,7 +495,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     let event_task = tokio::spawn(async move {
         while let Ok(msg) = event_rx.recv().await {
             let json = serde_json::to_string(&msg).unwrap();
-            if outgoing_for_events.send(Message::Text(json.into())).is_err() {
+            if outgoing_for_events
+                .send(Message::Text(json.into()))
+                .is_err()
+            {
                 break;
             }
         }
@@ -357,7 +510,12 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             match msg {
                 Message::Text(text) => {
                     if let Ok(control_msg) = serde_json::from_str::<ControlMessage>(&text) {
-                        handle_browser_message(state_clone.clone(), control_msg, outgoing_tx.clone()).await;
+                        handle_browser_message(
+                            state_clone.clone(),
+                            control_msg,
+                            outgoing_tx.clone(),
+                        )
+                        .await;
                     }
                 }
                 Message::Close(_) => break,
@@ -382,8 +540,19 @@ async fn handle_browser_message(
 ) {
     tracing::debug!("Browser message received: {:?}", msg);
     match msg {
-        ControlMessage::TransferRequest { id, entries, direction, destination_path } => {
-            tracing::info!("Browser TransferRequest: id={}, entries={}, direction={:?}, dest={}", id, entries.len(), direction, destination_path);
+        ControlMessage::TransferRequest {
+            id,
+            entries,
+            direction,
+            destination_path,
+        } => {
+            tracing::info!(
+                "Browser TransferRequest: id={}, entries={}, direction={:?}, dest={}",
+                id,
+                entries.len(),
+                direction,
+                destination_path
+            );
             tokio::spawn(async move {
                 browser_transfer::handle_browser_transfer(
                     state,
@@ -392,7 +561,8 @@ async fn handle_browser_message(
                     direction,
                     destination_path,
                     ws_tx,
-                ).await;
+                )
+                .await;
             });
         }
         _ => {
@@ -413,43 +583,73 @@ async fn handle_server_to_server_request(
         ControlMessage::BrowseRequest { path } => {
             match crate::fileops::browse::list_directory(&state.config.root_dir, &path) {
                 Ok(entries) => {
-                    let cwd = state.config.root_dir.join(&path)
+                    let cwd = state
+                        .config
+                        .root_dir
+                        .join(&path)
                         .canonicalize()
                         .unwrap_or_else(|_| state.config.root_dir.clone())
-                        .to_string_lossy().to_string();
+                        .to_string_lossy()
+                        .to_string();
                     Some(ControlMessage::BrowseResponse {
                         hostname: state.config.hostname.clone(),
                         cwd,
                         entries,
                     })
                 }
-                Err(e) => Some(ControlMessage::Error { message: e.to_string() }),
+                Err(e) => Some(ControlMessage::Error {
+                    message: e.to_string(),
+                }),
             }
         }
         ControlMessage::InfoRequest => Some(ControlMessage::InfoResponse {
             hostname: state.config.hostname.clone(),
             root_dir: state.config.root_dir.to_string_lossy().to_string(),
         }),
-        ControlMessage::TransferRequest { id, entries, direction, destination_path } => {
-            tracing::info!("Server received TransferRequest from client: id={}, entries={}, direction={:?}, dest={}", id, entries.len(), direction, destination_path);
+        ControlMessage::TransferRequest {
+            id,
+            entries,
+            direction,
+            destination_path,
+        } => {
+            tracing::info!(
+                "Server received TransferRequest from client: id={}, entries={}, direction={:?}, dest={}",
+                id,
+                entries.len(),
+                direction,
+                destination_path
+            );
 
             use crate::protocol::messages::Direction;
             match direction {
                 Direction::Push => {
-                    tracing::info!("Accepting push transfer, preparing to receive {} files", entries.len());
-                    state.transfer_receiver.start_transfer(id, entries.clone(), destination_path).await;
+                    tracing::info!(
+                        "Accepting push transfer, preparing to receive {} files",
+                        entries.len()
+                    );
+                    state
+                        .transfer_receiver
+                        .start_transfer(id, entries.clone(), destination_path)
+                        .await;
                     Some(ControlMessage::TransferAccepted {
                         id,
                         resume_offsets: std::collections::HashMap::new(),
                     })
                 }
                 Direction::Pull => {
-                    tracing::info!("Accepting pull transfer, will send {} entries", entries.len());
+                    tracing::info!(
+                        "Accepting pull transfer, will send {} entries",
+                        entries.len()
+                    );
 
-                    let frame_tx = {
+                    let (frame_tx, peer_version) = {
                         let remote = state.remote.read().await;
-                        remote.as_ref().map(|r| r.frame_tx.clone())
+                        remote
+                            .as_ref()
+                            .map(|r| (r.frame_tx.clone(), r.peer_version))
+                            .unzip()
                     };
+                    let peer_version = peer_version.flatten();
 
                     let Some(frame_tx) = frame_tx else {
                         return Some(ControlMessage::TransferError {
@@ -460,7 +660,14 @@ async fn handle_server_to_server_request(
 
                     let root_dir = state.config.root_dir.clone();
                     tokio::spawn(async move {
-                        browser_transfer::send_entries(&root_dir, id, &entries, &frame_tx).await;
+                        browser_transfer::send_entries(
+                            &root_dir,
+                            id,
+                            &entries,
+                            &frame_tx,
+                            peer_version,
+                        )
+                        .await;
                     });
 
                     Some(ControlMessage::TransferAccepted {
@@ -478,10 +685,7 @@ async fn handle_server_to_server_request(
 /// Handle requests from browser (forward to remote if available, else local).
 /// BrowseRequest is NOT handled locally when there is no remote — it returns an error
 /// to prevent the remote panel from mirroring local files.
-async fn handle_control_message(
-    state: &AppState,
-    msg: ControlMessage,
-) -> Option<ControlMessage> {
+async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option<ControlMessage> {
     if !matches!(msg, ControlMessage::InfoRequest) {
         let remote = state.remote.read().await;
         if let Some(ref remote_conn) = *remote {
@@ -489,12 +693,16 @@ async fn handle_control_message(
             if remote_conn.tx.send((msg.clone(), response_tx)).is_ok() {
                 match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
                     Ok(Ok(response)) => return Some(response),
-                    Ok(Err(_)) => return Some(ControlMessage::Error {
-                        message: "Remote connection lost".to_string(),
-                    }),
-                    Err(_) => return Some(ControlMessage::Error {
-                        message: "Remote timeout".to_string(),
-                    }),
+                    Ok(Err(_)) => {
+                        return Some(ControlMessage::Error {
+                            message: "Remote connection lost".to_string(),
+                        });
+                    }
+                    Err(_) => {
+                        return Some(ControlMessage::Error {
+                            message: "Remote timeout".to_string(),
+                        });
+                    }
                 }
             }
             // tx.send failed: channel closed
@@ -515,17 +723,23 @@ async fn handle_control_message(
         ControlMessage::BrowseRequest { path } => {
             match crate::fileops::browse::list_directory(&state.config.root_dir, &path) {
                 Ok(entries) => {
-                    let cwd = state.config.root_dir.join(&path)
+                    let cwd = state
+                        .config
+                        .root_dir
+                        .join(&path)
                         .canonicalize()
                         .unwrap_or_else(|_| state.config.root_dir.clone())
-                        .to_string_lossy().to_string();
+                        .to_string_lossy()
+                        .to_string();
                     Some(ControlMessage::BrowseResponse {
                         hostname: state.config.hostname.clone(),
                         cwd,
                         entries,
                     })
                 }
-                Err(e) => Some(ControlMessage::Error { message: e.to_string() }),
+                Err(e) => Some(ControlMessage::Error {
+                    message: e.to_string(),
+                }),
             }
         }
         ControlMessage::InfoRequest => Some(ControlMessage::InfoResponse {

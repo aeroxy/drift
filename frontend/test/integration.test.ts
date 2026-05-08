@@ -490,31 +490,38 @@ describe('drift dynamic port and connection management', () => {
     }
   }, 30_000);
 
-  it('disconnects from remote via POST /api/disconnect', async () => {
-    // serverB should currently be connected to serverA (from previous test)
-    const infoBeforeRes = await fetch(`${serverB.baseUrl}/api/info`);
-    const infoBefore = await infoBeforeRes.json();
-    expect(infoBefore.has_remote, 'should be connected before disconnect').toBe(true);
+    it('disconnects from remote via POST /api/disconnect', async () => {
+      // serverB should currently be connected to serverA (from previous test)
+      const infoBeforeRes = await fetch(`${serverB.baseUrl}/api/info`);
+      const infoBefore = await infoBeforeRes.json();
+      expect(infoBefore.has_remote, 'should be connected before disconnect').toBe(true);
 
-    // Subscribe to WS before disconnecting to catch the ConnectionStatus event
-    const ws = await WsBrowserClient.connect(serverB.wsUrl);
-    const statusPromise = ws.waitForMessage(
-      (msg) => msg.type === 'ConnectionStatus',
-      10_000,
-    );
+      // Subscribe to WS before disconnecting to catch the ConnectionStatus event.
+      // The first browser message triggers server-side browser connection setup
+      // (event subscription, etc.). Without this, the server hangs waiting for
+      // the first text frame to determine connection type.
+      const ws = await WsBrowserClient.connect(serverB.wsUrl);
+      ws.send({ type: 'InfoRequest' });
+      // Wait for the browser connection to be fully initialized (including the
+      // initial ConnectionStatus push), then subscribe for the disconnect event.
+      await ws.waitForMessage((msg) => msg.type === 'ConnectionStatus', 10_000);
+      const statusPromise = ws.waitForMessage(
+        (msg) => msg.type === 'ConnectionStatus' && msg.has_remote === false,
+        10_000,
+      );
 
-    const res = await fetch(`${serverB.baseUrl}/api/disconnect`, { method: 'POST' });
-    expect(res.ok, 'POST /api/disconnect should return 200').toBe(true);
-    const data = await res.json();
-    expect(data.success, 'disconnect should succeed').toBe(true);
+      const res = await fetch(`${serverB.baseUrl}/api/disconnect`, { method: 'POST' });
+      expect(res.ok, 'POST /api/disconnect should return 200').toBe(true);
+      const data = await res.json();
+      expect(data.success, 'disconnect should succeed').toBe(true);
 
-    // Should receive ConnectionStatus { has_remote: false } over WebSocket
-    const statusMsg = await statusPromise;
-    expect(statusMsg.type).toBe('ConnectionStatus');
-    if (statusMsg.type === 'ConnectionStatus') {
-      expect(statusMsg.has_remote).toBe(false);
-    }
-    ws.close();
+      // Should receive ConnectionStatus { has_remote: false } over WebSocket
+      const statusMsg = await statusPromise;
+      expect(statusMsg.type).toBe('ConnectionStatus');
+      if (statusMsg.type === 'ConnectionStatus') {
+        expect(statusMsg.has_remote).toBe(false);
+      }
+      ws.close();
 
     // /api/info should confirm disconnected state
     const infoAfter = await fetch(`${serverB.baseUrl}/api/info`).then((r) => r.json());
@@ -582,8 +589,8 @@ describe('password authentication', () => {
     await hostProc.stop();
   }, 30_000);
 
-  it('rejects wrong password', () => {
-    expect(async () => {
+  it('rejects wrong password', async () => {
+    await expect((async () => {
       hostProc = new DriftProcess({ port: await getAvailablePort(), cwd: hostDir, password: 'correct' });
       await hostProc.start();
 
@@ -595,11 +602,11 @@ describe('password authentication', () => {
       } finally {
         await hostProc.stop();
       }
-    }).rejects.toThrow();
+    })()).rejects.toThrow();
   }, 30_000);
 
-  it('rejects client with no password when server requires one', () => {
-    expect(async () => {
+  it('rejects client with no password when server requires one', async () => {
+    await expect((async () => {
       hostProc = new DriftProcess({ port: await getAvailablePort(), cwd: hostDir, password: 'required' });
       await hostProc.start();
 
@@ -611,7 +618,7 @@ describe('password authentication', () => {
       } finally {
         await hostProc.stop();
       }
-    }).rejects.toThrow();
+    })()).rejects.toThrow();
   }, 30_000);
 });
 
@@ -873,6 +880,76 @@ describe('drift multi-entry transfer', () => {
     const hostAfter = await waitForChecksums(hostDir, expected);
     for (const [rel, md5] of expected) {
       expect(hostAfter.get(rel), `multi-entry push: "${rel}" missing on host`).toBe(md5);
+    }
+  }, 180_000);
+
+  it('preserves peer connection when a CLI ls command connects transiently', async () => {
+    // Verify the persistent peer connection is alive before we run the CLI.
+    const infoBefore = await fetch(`${hostProc!.baseUrl}/api/info`).then((r) => r.json()) as InfoResponse;
+    expect(infoBefore.has_remote, 'host should have remote before CLI ls').toBe(true);
+
+    // Run `drift ls` targeting the host server.  This creates a transient
+    // server-to-server connection on top of the already-connected persistent
+    // peer.  ws_handler must save-and-restore state.remote around this.
+    const lsOutput = runDriftCli(['ls', '--target', `127.0.0.1:${hostProc!.port}`]);
+    expect(lsOutput).toBeTruthy();
+
+    // After the CLI ls finishes, the persistent peer connection must still be
+    // alive — the save-and-restore logic in ws_handler is what ensures this.
+    const infoAfter = await fetch(`${hostProc!.baseUrl}/api/info`).then((r) => r.json()) as InfoResponse;
+    expect(infoAfter.has_remote, 'host should still have remote after CLI ls').toBe(true);
+  }, 30_000);
+
+  it('pulls 2 files + 1 folder in a single TransferRequest', async () => {
+    // Seed host with files to pull. Since clientProc -> hostProc is the
+    // remote connection, a Pull from clientProc will read from hostProc's
+    // root_dir and deliver to clientProc's root_dir.
+    const seedDir = fs.mkdtempSync('/tmp/drift-multi-pull-seed-');
+    try {
+      fs.writeFileSync(path.join(seedDir, 'xray.txt'), 'xray data\n');
+      fs.writeFileSync(path.join(seedDir, 'yoga.bin'), Buffer.from([10, 20, 30, 40, 50]));
+      fs.mkdirSync(path.join(seedDir, 'zebra'));
+      fs.writeFileSync(path.join(seedDir, 'zebra', 'stripes.txt'), 'black and white\n');
+
+      // Re-seed hostDir (the remote side that will serve the pull)
+      fs.rmSync(hostDir, { recursive: true, force: true });
+      fs.cpSync(seedDir, hostDir, { recursive: true });
+
+      const expected = await computeAllChecksums(hostDir);
+      expect(expected.size, 'seed should produce three files').toBe(3);
+
+      const entries = await browseEntries(hostProc!.baseUrl);
+      const selected = entries.filter((e) => ['xray.txt', 'yoga.bin', 'zebra'].includes(e.name));
+      expect(selected.length, 'all three seeded entries should be browsable').toBe(3);
+
+      // Connect to clientProc (the local side); Pull fetches from remote (hostProc).
+      const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+      try {
+        const id = crypto.randomUUID();
+        const done = ws.waitForTransferComplete(id, 120_000);
+        ws.send({
+          type: 'TransferRequest',
+          id,
+          entries: selected.map((e) => ({
+            relative_path: e.name,
+            size: e.size,
+            is_dir: e.is_dir,
+            permissions: e.permissions,
+          })),
+          direction: 'Pull',
+          destination_path: '.',
+        });
+        await done;
+      } finally {
+        ws.close();
+      }
+
+      const clientAfter = await waitForChecksums(clientDir, expected);
+      for (const [rel, md5] of expected) {
+        expect(clientAfter.get(rel), `multi-entry pull: "${rel}" missing on client`).toBe(md5);
+      }
+    } finally {
+      fs.rmSync(seedDir, { recursive: true, force: true });
     }
   }, 180_000);
 });
