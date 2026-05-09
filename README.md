@@ -40,8 +40,7 @@
 ### Homebrew (macOS / Linux)
 
 ```bash
-brew tap aeroxy/drift https://github.com/aeroxy/drift.git
-brew install drift
+brew install aeroxy/tap/drift
 ```
 
 ### From source
