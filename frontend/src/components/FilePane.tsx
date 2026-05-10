@@ -1,9 +1,9 @@
-import { useCallback } from "react";
+import { useCallback, useState, useMemo } from "react";
 import type { FileEntry } from "../types/protocol";
 import type { Transfer } from "../hooks/useTransfer";
 import type { SelectModifiers } from "./FileRow";
 import PathBar from "./PathBar";
-import FileList from "./FileList";
+import FileList, { type SortKey, type SortDirection } from "./FileList";
 import TransferBar from "./TransferBar";
 
 interface FilePaneProps {
@@ -36,6 +36,38 @@ export default function FilePane({
   loading,
   fetchSuggestions,
 }: FilePaneProps) {
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+
+  const handleSort = useCallback((key: SortKey) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDirection("asc");
+    }
+  }, [sortKey]);
+
+  const sortedEntries = useMemo(() => {
+    return [...entries].sort((a, b) => {
+      // Always directories first
+      if (a.is_dir !== b.is_dir) {
+        return a.is_dir ? -1 : 1;
+      }
+
+      let comparison = 0;
+      if (sortKey === "name") {
+        comparison = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+      } else if (sortKey === "size") {
+        comparison = a.size - b.size;
+      } else if (sortKey === "date") {
+        comparison = a.modified - b.modified;
+      }
+
+      return sortDirection === "asc" ? comparison : -comparison;
+    });
+  }, [entries, sortKey, sortDirection]);
+
   const handleGoUp = useCallback(() => {
     const parts = cwd.split("/").filter(Boolean);
     if (parts.length > 1) {
@@ -52,12 +84,15 @@ export default function FilePane({
         </div>
       ) : (
         <FileList
-          entries={entries}
+          entries={sortedEntries}
           selected={selected}
           onSelect={onSelect}
           onNavigate={onNavigate}
           onGoUp={handleGoUp}
           canGoUp={cwd !== "/"}
+          sortKey={sortKey}
+          sortDirection={sortDirection}
+          onSort={handleSort}
         />
       )}
       <TransferBar transfers={transfers} />

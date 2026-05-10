@@ -15,6 +15,8 @@ interface FileRowProps {
   selected: boolean;
   onSelect: (name: string, mods: SelectModifiers) => void;
   onNavigate: (name: string) => void;
+  sizeWidth: number;
+  dateWidth: number;
 }
 
 function getIcon(entry: FileEntry) {
@@ -50,7 +52,7 @@ function formatDate(timestamp: number): string {
   });
 }
 
-export default function FileRow({ entry, selected, onSelect, onNavigate }: FileRowProps) {
+export default function FileRow({ entry, selected, onSelect, onNavigate, sizeWidth, dateWidth }: FileRowProps) {
   return (
     <div
       className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer transition-colors group ${
@@ -86,10 +88,10 @@ export default function FileRow({ entry, selected, onSelect, onNavigate }: FileR
       >
         {entry.name}
       </span>
-      <span className="text-xs text-zinc-500 w-16 text-right tabular-nums">
+      <span className="text-xs text-zinc-500 text-right tabular-nums" style={{ width: sizeWidth }}>
         {entry.is_dir ? "" : formatSize(entry.size)}
       </span>
-      <span className="text-xs text-zinc-600 w-28 text-right hidden md:block">
+      <span className="text-xs text-zinc-600 text-right hidden md:block truncate" style={{ width: dateWidth }}>
         {formatDate(entry.modified)}
       </span>
     </div>
