@@ -1,6 +1,6 @@
 [package]
 name = "drift"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Encrypted bidirectional file transfer over WebSocket with an embedded web UI"
 authors = ["Aero <aero.windwalker@gmail.com>"]
