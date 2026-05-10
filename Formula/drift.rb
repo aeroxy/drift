@@ -7,14 +7,14 @@ class Drift < Formula
   on_macos do
     on_arm do
       url "https://github.com/aeroxy/drift/releases/download/#{version}/drift_macos_arm64.zip"
-      sha256 "3392dbb7d2685e85cc0c2b1c91fadbf24690fd82a2ebaf8d9a7752fe584fe1a5"
+      sha256 "d1c5e52993e90bf0e1caf5b97939bcd482bee546701bac82f193d1b73e5065e4"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/aeroxy/drift/releases/download/#{version}/drift_linux_x86_64.zip"
-      sha256 "e097c0223ca3cc4ba88a1ba0ecae59ab831d764f3be1c8be09419c36dee538b3"
+      sha256 "9dee4249fb01c66e34c0cc67d33085370a22f76286acfa36135d41c35b68de95"
     end
   end
 
