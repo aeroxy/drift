@@ -20,7 +20,7 @@ pub struct ActiveTransfer {
     pub destination_path: String,
     /// Set when TransferComplete arrives, triggering auto-finalize in receive_chunk.
     expected_total: Option<u64>,
-    completion_tx: Option<oneshot::Sender<()>>,
+    completion_tx: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 pub struct TransferReceiver {
@@ -73,7 +73,7 @@ impl TransferReceiver {
         id: Uuid,
         entries: Vec<TransferEntry>,
         destination_path: String,
-    ) -> oneshot::Receiver<()> {
+    ) -> oneshot::Receiver<Result<(), String>> {
         tracing::info!(
             "Starting to receive transfer (with notify): {} ({} entries) to {}",
             id,
@@ -307,7 +307,7 @@ impl TransferReceiver {
 
             // Notify any waiters (e.g. Pull transfers waiting for completion)
             if let Some(tx) = transfer.completion_tx {
-                let _ = tx.send(());
+                let _ = tx.send(Ok(()));
             }
         }
 
@@ -318,5 +318,17 @@ impl TransferReceiver {
     pub async fn abort_transfer(&self, id: Uuid) {
         self.active_transfers.lock().await.remove(&id);
         tracing::warn!("Transfer aborted: {}", id);
+    }
+
+    /// Signal that the sender encountered an error for this transfer.
+    /// Cleans up any partial state and notifies waiters with the error.
+    pub async fn signal_error(&self, id: Uuid, error: String) {
+        let mut active = self.active_transfers.lock().await;
+        if let Some(transfer) = active.remove(&id) {
+            tracing::error!("Transfer error for {}: {}", id, error);
+            if let Some(tx) = transfer.completion_tx {
+                let _ = tx.send(Err(error));
+            }
+        }
     }
 }

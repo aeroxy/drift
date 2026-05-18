@@ -334,6 +334,15 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     continue;
                                 }
 
+                                if let ControlMessage::TransferError { id, error } = control_msg {
+                                    tracing::error!("Received TransferError for {}: {}", id, error);
+                                    state_read
+                                        .transfer_receiver
+                                        .signal_error(id, error)
+                                        .await;
+                                    continue;
+                                }
+
                                 if control_msg.is_request() {
                                     tracing::debug!(
                                         "Server handling request from client: {:?}",

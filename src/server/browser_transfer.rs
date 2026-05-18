@@ -123,7 +123,7 @@ pub async fn handle_browser_transfer(
 
                     match tokio::time::timeout(std::time::Duration::from_secs(1800), done_rx).await
                     {
-                        Ok(Ok(())) => {
+                        Ok(Ok(Ok(()))) => {
                             tracing::info!("Pull transfer complete: {}", id);
                             let _ = ws_tx.send(Message::Text(
                                 serde_json::to_string(&ControlMessage::TransferComplete {
@@ -133,6 +133,9 @@ pub async fn handle_browser_transfer(
                                 .unwrap()
                                 .into(),
                             ));
+                        }
+                        Ok(Ok(Err(error))) => {
+                            send_error(&ws_tx, id, &error);
                         }
                         Ok(Err(_)) => {
                             send_error(&ws_tx, id, "Pull transfer channel closed unexpectedly")
