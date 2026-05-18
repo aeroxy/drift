@@ -322,13 +322,17 @@ impl TransferReceiver {
 
     /// Signal that the sender encountered an error for this transfer.
     /// Cleans up any partial state and notifies waiters with the error.
-    pub async fn signal_error(&self, id: Uuid, error: String) {
+    /// Returns true if an active transfer was found and removed.
+    pub async fn signal_error(&self, id: Uuid, error: String) -> bool {
         let mut active = self.active_transfers.lock().await;
         if let Some(transfer) = active.remove(&id) {
             tracing::error!("Transfer error for {}: {}", id, error);
             if let Some(tx) = transfer.completion_tx {
                 let _ = tx.send(Err(error));
             }
+            true
+        } else {
+            false
         }
     }
 }
