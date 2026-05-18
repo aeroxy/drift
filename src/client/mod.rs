@@ -396,7 +396,19 @@ pub async fn connect_to_remote(
                                 tracing::info!("Received TransferFinalized: {}", id);
                                 let mut pending = state_read.pending_completions.lock().await;
                                 if let Some(tx) = pending.remove(&id) {
-                                    let _ = tx.send(());
+                                    let _ = tx.send(Ok(()));
+                                }
+                                continue;
+                            }
+
+                            if let ControlMessage::TransferError { id, ref error } = control_msg {
+                                tracing::error!("Received TransferError for {}: {}", id, error);
+                                state_read
+                                    .transfer_receiver
+                                    .signal_error(id, error.clone())
+                                    .await;
+                                if let Some(tx) = state_read.pending_completions.lock().await.remove(&id) {
+                                    let _ = tx.send(Err(error.clone()));
                                 }
                                 continue;
                             }

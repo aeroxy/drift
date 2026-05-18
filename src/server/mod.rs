@@ -18,9 +18,9 @@ pub struct AppState {
     pub config: AppConfig,
     pub remote: RwLock<Option<RemoteConnection>>,
     pub transfer_receiver: transfer_receiver::TransferReceiver,
-    /// Oneshot channels fired when a remote confirms TransferFinalized.
+    /// Oneshot channels fired when a remote confirms TransferFinalized or sends TransferError.
     /// push_entries registers here before sending TransferComplete.
-    pub pending_completions: Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
+    pub pending_completions: Mutex<HashMap<Uuid, oneshot::Sender<Result<(), String>>>>,
     /// Broadcast channel for pushing events (ConnectionStatus etc.) to all browsers.
     pub browser_events: broadcast::Sender<ControlMessage>,
     /// Short hex fingerprint of the DH shared secret (for visual MITM verification).

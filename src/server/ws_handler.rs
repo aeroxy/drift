@@ -329,17 +329,33 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     tracing::info!("Received TransferFinalized: {}", id);
                                     let mut pending = state_read.pending_completions.lock().await;
                                     if let Some(tx) = pending.remove(&id) {
-                                        let _ = tx.send(());
+                                        let _ = tx.send(Ok(()));
                                     }
                                     continue;
                                 }
 
-                                if let ControlMessage::TransferError { id, error } = control_msg {
+                                if let ControlMessage::TransferError { id, ref error } = control_msg {
                                     tracing::error!("Received TransferError for {}: {}", id, error);
+
+                                    // Check if this is a response to a pending request
+                                    // (e.g. remote immediately rejected TransferRequest)
+                                    let mut pending_lock = pending_read.lock().await;
+                                    if let Some(response_tx) = pending_lock.remove(&id) {
+                                        let _ = response_tx.send(control_msg);
+                                        continue;
+                                    }
+                                    drop(pending_lock);
+
+                                    // Notify active Pull receiver
                                     state_read
                                         .transfer_receiver
-                                        .signal_error(id, error)
+                                        .signal_error(id, error.clone())
                                         .await;
+
+                                    // Notify active Push sender
+                                    if let Some(tx) = state_read.pending_completions.lock().await.remove(&id) {
+                                        let _ = tx.send(Err(error.clone()));
+                                    }
                                     continue;
                                 }
 
