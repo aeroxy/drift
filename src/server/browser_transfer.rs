@@ -334,7 +334,7 @@ async fn push_entries(
 
     // Register completion waiter BEFORE sending any data, so TransferFinalized
     // cannot arrive and be missed between sending TransferComplete and registering.
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     state.pending_completions.lock().await.insert(id, done_tx);
 
     for (file_idx, (display_name, file_path, _file_size, _cleanup)) in
@@ -394,7 +394,7 @@ async fn push_entries(
 
     // Wait for the remote to confirm receipt before telling the browser
     match tokio::time::timeout(std::time::Duration::from_secs(300), done_rx).await {
-        Ok(Ok(())) => {
+        Ok(Ok(Ok(()))) => {
             tracing::info!("Push verified complete: {} ({} bytes)", id, total_sent);
             let _ = ws_tx.send(Message::Text(
                 serde_json::to_string(&ControlMessage::TransferComplete {
@@ -404,6 +404,9 @@ async fn push_entries(
                 .unwrap()
                 .into(),
             ));
+        }
+        Ok(Ok(Err(error))) => {
+            send_error(ws_tx, id, &error);
         }
         Ok(Err(_)) => {
             send_error(ws_tx, id, "Remote completion channel closed unexpectedly");
