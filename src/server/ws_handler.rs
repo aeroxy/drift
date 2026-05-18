@@ -337,18 +337,23 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                 if let ControlMessage::TransferError { id, ref error } = control_msg {
                                     tracing::error!("Received TransferError for {}: {}", id, error);
 
-                                    // Clean up active transfer state (no-ops if nothing active)
-                                    state_read
+                                    // If an active transfer was found, we're done — don't fall
+                                    // through to the generic response handler, which would steal
+                                    // an unrelated request's response channel (FIFO).
+                                    let handled = state_read
                                         .transfer_receiver
                                         .signal_error(id, error.clone())
                                         .await;
                                     if let Some(tx) = state_read.pending_completions.lock().await.remove(&id) {
                                         let _ = tx.send(Err(error.clone()));
                                     }
+                                    if handled {
+                                        continue;
+                                    }
 
-                                    // Fall through to the generic response handler below
-                                    // so TransferError is forwarded to any pending requester
-                                    // (e.g. remote immediately rejected TransferRequest).
+                                    // No active transfer — likely a synchronous rejection of a
+                                    // TransferRequest. Fall through to the generic response
+                                    // handler below to forward it to the pending requester.
                                 }
 
                                 if control_msg.is_request() {
