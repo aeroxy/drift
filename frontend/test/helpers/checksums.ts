@@ -14,7 +14,7 @@ function computeFileChecksum(filePath: string): Promise<string> {
 
 function walkDir(dir: string, base: string, results: string[]): void {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === '.drift' || entry.name === '.DS_Store') continue;
+    if (entry.name === '.drift' || entry.name === '.DS_Store' || entry.name.endsWith('.part')) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       walkDir(full, base, results);
