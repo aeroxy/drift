@@ -325,9 +325,60 @@ impl TransferReceiver {
     /// Returns true if an active transfer was found and removed.
     pub async fn signal_error(&self, id: Uuid, error: String) -> bool {
         let mut active = self.active_transfers.lock().await;
-        if let Some(transfer) = active.remove(&id) {
+        if let Some(mut transfer) = active.remove(&id) {
             tracing::error!("Transfer error for {}: {}", id, error);
-            if let Some(tx) = transfer.completion_tx {
+
+            // Collect paths to clean up, dropping writers to release file handles
+            let mut cleanup_paths: Vec<(u32, std::path::PathBuf)> = Vec::new();
+            for (file_index, writer) in transfer.writers.drain() {
+                let part_path = writer.part_path().to_path_buf();
+                drop(writer);
+                cleanup_paths.push((file_index, part_path));
+            }
+
+            // Collect .drift/ temp archives for directory transfers
+            let archive_paths: Vec<std::path::PathBuf> = if transfer.has_dirs {
+                transfer
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, _entry)| {
+                        self.root_dir
+                            .join(".drift")
+                            .join(format!("{}_{}.tar.gz", id, idx))
+                    })
+                    .filter(|p| p.exists())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let completion_tx = transfer.completion_tx;
+            drop(active);
+
+            // Remove files outside the lock using async I/O
+            for (file_index, part_path) in cleanup_paths {
+                if let Err(e) = tokio::fs::remove_file(&part_path).await {
+                    tracing::warn!(
+                        "Failed to remove partial file {} for transfer {}: {}",
+                        part_path.display(),
+                        file_index,
+                        e
+                    );
+                }
+            }
+
+            for archive_path in archive_paths {
+                if let Err(e) = tokio::fs::remove_file(&archive_path).await {
+                    tracing::warn!(
+                        "Failed to clean up archive {}: {}",
+                        archive_path.display(),
+                        e
+                    );
+                }
+            }
+
+            if let Some(tx) = completion_tx {
                 let _ = tx.send(Err(error));
             }
             true

@@ -60,6 +60,10 @@ impl ChunkedWriter {
         self.bytes_written
     }
 
+    pub fn part_path(&self) -> &Path {
+        &self.part_path
+    }
+
     /// Check how many bytes have already been written for resume support
     pub async fn resume_offset(path: &Path) -> u64 {
         let part_path = path.with_extension(format!(

@@ -411,16 +411,18 @@ pub async fn connect_to_remote(
                                     .transfer_receiver
                                     .signal_error(id, error.clone())
                                     .await;
-                                if let Some(tx) = state_read.pending_completions.lock().await.remove(&id) {
-                                    let _ = tx.send(Err(error.clone()));
-                                }
                                 if handled {
                                     continue;
                                 }
 
-                                // No active transfer — likely a synchronous rejection of a
-                                // TransferRequest. Fall through to the generic response
-                                // handler below to forward it to the pending requester.
+                                if let Some(tx) = state_read.pending_completions.lock().await.remove(&id) {
+                                    let _ = tx.send(Err(error.clone()));
+                                    continue;
+                                }
+
+                                // No active transfer or pending completion — likely a
+                                // synchronous rejection of a TransferRequest. Fall through
+                                // to the generic response handler below.
                             }
 
                             if control_msg.is_request() {
