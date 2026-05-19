@@ -325,36 +325,21 @@ impl TransferReceiver {
     /// Returns true if an active transfer was found and removed.
     pub async fn signal_error(&self, id: Uuid, error: String) -> bool {
         let mut active = self.active_transfers.lock().await;
-        if let Some(mut transfer) = active.remove(&id) {
-            tracing::error!("Transfer error for {}: {}", id, error);
+        let Some(transfer) = active.remove(&id) else {
+            return false;
+        };
+        drop(active);
 
-            // Collect paths to clean up, dropping writers to release file handles
-            let mut cleanup_paths: Vec<(u32, std::path::PathBuf)> = Vec::new();
-            for (file_index, writer) in transfer.writers.drain() {
-                let part_path = writer.part_path().to_path_buf();
-                drop(writer);
-                cleanup_paths.push((file_index, part_path));
-            }
+        tracing::error!("Transfer error for {}: {}", id, error);
 
-            // Collect .drift/ temp archives for directory transfers
-            let archive_paths: Vec<std::path::PathBuf> = transfer
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| entry.is_dir)
-                .map(|(idx, _entry)| {
-                    self.root_dir
-                        .join(".drift")
-                        .join(format!("{}_{}.tar.gz", id, idx))
-                })
-                .collect();
-
-            let completion_tx = transfer.completion_tx;
-            drop(active);
-
-            // Remove files outside the lock using async I/O
-            for (file_index, part_path) in cleanup_paths {
-                if let Err(e) = tokio::fs::remove_file(&part_path).await {
+        // Clean up partial files. Dropping writers releases file handles for deletion.
+        for (file_index, writer) in transfer.writers {
+            let part_path = writer.part_path().to_path_buf();
+            drop(writer);
+            match tokio::fs::remove_file(&part_path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
                     tracing::warn!(
                         "Failed to remove partial file {} for transfer {}: {}",
                         part_path.display(),
@@ -363,8 +348,15 @@ impl TransferReceiver {
                     );
                 }
             }
+        }
 
-            for archive_path in archive_paths {
+        // Clean up .drift/ temp archives for directory transfers
+        for (idx, entry) in transfer.entries.iter().enumerate() {
+            if entry.is_dir {
+                let archive_path = self
+                    .root_dir
+                    .join(".drift")
+                    .join(format!("{}_{}.tar.gz", id, idx));
                 match tokio::fs::remove_file(&archive_path).await {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -377,13 +369,11 @@ impl TransferReceiver {
                     }
                 }
             }
-
-            if let Some(tx) = completion_tx {
-                let _ = tx.send(Err(error));
-            }
-            true
-        } else {
-            false
         }
+
+        if let Some(tx) = transfer.completion_tx {
+            let _ = tx.send(Err(error));
+        }
+        true
     }
 }
