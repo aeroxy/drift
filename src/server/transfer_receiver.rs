@@ -20,7 +20,7 @@ pub struct ActiveTransfer {
     pub destination_path: String,
     /// Set when TransferComplete arrives, triggering auto-finalize in receive_chunk.
     expected_total: Option<u64>,
-    completion_tx: Option<oneshot::Sender<Result<(), String>>>,
+    completion_tx: Option<oneshot::Sender<Result<u64, String>>>,
 }
 
 pub struct TransferReceiver {
@@ -73,7 +73,7 @@ impl TransferReceiver {
         id: Uuid,
         entries: Vec<TransferEntry>,
         destination_path: String,
-    ) -> oneshot::Receiver<Result<(), String>> {
+    ) -> oneshot::Receiver<Result<u64, String>> {
         tracing::info!(
             "Starting to receive transfer (with notify): {} ({} entries) to {}",
             id,
@@ -296,15 +296,19 @@ impl TransferReceiver {
                             dest_dir
                         );
                         if let Err(e) = decompress::decompress_archive(&archive_path, &dest_dir) {
-                            // Decompression failed — clean up all remaining archives in this transfer
+                            // Decompression failed — clean up all remaining archives in this transfer concurrently
+                            let mut cleanup_futures = Vec::new();
                             for (idx2, entry2) in transfer.entries.iter().enumerate() {
                                 if entry2.is_dir {
                                     let path_to_remove = self.archive_path(id, idx2);
-                                    let _ = std::fs::remove_file(&path_to_remove);
                                     let part_path = path_to_remove.with_extension("gz.part");
-                                    let _ = std::fs::remove_file(&part_path);
+                                    cleanup_futures.push(async move {
+                                        let _ = tokio::fs::remove_file(&path_to_remove).await;
+                                        let _ = tokio::fs::remove_file(&part_path).await;
+                                    });
                                 }
                             }
+                            futures_util::future::join_all(cleanup_futures).await;
                             return Err(format!("Failed to decompress {}: {}", entry.relative_path, e));
                         }
                     }
@@ -313,7 +317,7 @@ impl TransferReceiver {
 
             // Notify any waiters (e.g. Pull transfers waiting for completion)
             if let Some(tx) = transfer.completion_tx {
-                let _ = tx.send(Ok(()));
+                let _ = tx.send(Ok(transfer.total_bytes_written));
             }
         }
 

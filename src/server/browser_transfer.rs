@@ -128,12 +128,12 @@ pub async fn handle_browser_transfer(
                             send_error(&ws_tx, id, "Pull transfer channel closed unexpectedly")
                         }
                         Ok(Ok(transfer_result)) => match transfer_result {
-                            Ok(()) => {
+                            Ok(total_bytes) => {
                                 tracing::info!("Pull transfer complete: {}", id);
                                 let _ = ws_tx.send(Message::Text(
                                     serde_json::to_string(&ControlMessage::TransferComplete {
                                         id,
-                                        total_bytes: 0,
+                                        total_bytes,
                                     })
                                     .unwrap()
                                     .into(),
