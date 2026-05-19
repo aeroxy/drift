@@ -129,24 +129,24 @@ impl TransferReceiver {
                 .get(file_index as usize)
                 .ok_or_else(|| format!("Invalid file_index {} for transfer {}", file_index, id))?;
 
-            let file_path = if entry.is_dir {
-                // Directory: write to .drift/ temp directory as archive
-                let drift_dir = self.root_dir.join(".drift");
-                std::fs::create_dir_all(&drift_dir)
-                    .map_err(|e| format!("Failed to create .drift dir: {}", e))?;
-                drift_dir.join(format!("{}_{}.tar.gz", id, file_index))
+            let drift_dir = self.root_dir.join(".drift");
+
+            let (temp_path, final_path) = if entry.is_dir {
+                // Directory: stage archive in .drift/, finalize renames in-place
+                let archive = drift_dir.join(format!("{}_{}.tar.gz", id, file_index));
+                (archive.clone(), archive)
             } else {
-                // Regular file: write to destination directory using only the filename,
-                // not the full relative_path (which includes subdirectories from the sender side).
+                // Regular file: stage in .drift/, finalize moves to destination
                 let file_name = std::path::Path::new(&entry.relative_path)
                     .file_name()
                     .ok_or_else(|| format!("Invalid path: {}", entry.relative_path))?;
+
                 let dest_path = self
                     .root_dir
                     .join(&transfer.destination_path)
                     .join(file_name);
 
-                // Validate that the path is within root_dir (path traversal protection)
+                // Validate that the destination is within root_dir (path traversal protection)
                 let root_canonical = self
                     .root_dir
                     .canonicalize()
@@ -162,15 +162,20 @@ impl TransferReceiver {
                     }
                 }
 
-                dest_path
+                let temp = drift_dir.join(format!(
+                    "{}_{}_{}", id, file_index,
+                    file_name.to_string_lossy()
+                ));
+                (temp, dest_path)
             };
 
             tracing::info!(
-                "Creating writer for file_index={} at {:?}",
+                "Creating writer for file_index={}: temp={:?}, final={:?}",
                 file_index,
-                file_path
+                temp_path,
+                final_path
             );
-            let writer = ChunkedWriter::create(&file_path)
+            let writer = ChunkedWriter::create_with_temp(temp_path, final_path)
                 .await
                 .map_err(|e| format!("Failed to create writer: {}", e))?;
 
@@ -254,7 +259,28 @@ impl TransferReceiver {
             let has_dirs = transfer.has_dirs;
             let file_count = transfer.writers.len();
 
-            // Finalize all writers (take ownership from HashMap)
+            // Collect final paths for non-dir entries so we can roll them back on
+            // decompression failure. We must do this before draining the writers.
+            let finalized_file_paths: Vec<PathBuf> = if has_dirs {
+                transfer
+                    .writers
+                    .iter()
+                    .filter_map(|(&idx, writer)| {
+                        let entry = transfer.entries.get(idx as usize)?;
+                        if entry.is_dir {
+                            None
+                        } else {
+                            Some(writer.final_path().to_path_buf())
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Finalize all writers (take ownership from HashMap).
+            // For regular files this renames .drift/temp → destination.
+            // For directories this is a no-op rename (archive stays in .drift/).
             for (file_index, writer) in transfer.writers.drain() {
                 writer
                     .finalize()
@@ -296,23 +322,32 @@ impl TransferReceiver {
                             dest_dir
                         );
                         if let Err(e) = decompress::decompress_archive(&archive_path, &dest_dir) {
-                            // Decompression failed — clean up all remaining archives in this transfer concurrently
+                            let err_msg = format!(
+                                "Failed to decompress {}: {}", entry.relative_path, e
+                            );
+
+                            // Roll back the entire transfer: remove all archives still
+                            // in .drift/ and any regular files already moved to dest.
                             let mut cleanup_futures = Vec::new();
                             for (idx2, entry2) in transfer.entries.iter().enumerate() {
                                 if entry2.is_dir {
-                                    let path_to_remove = self.archive_path(id, idx2);
-                                    let mut part_os = path_to_remove.as_os_str().to_owned();
-                                    part_os.push(".part");
-                                    let part_path = std::path::PathBuf::from(part_os);
-                                    cleanup_futures.push(async move {
-                                        let _ = tokio::fs::remove_file(&path_to_remove).await;
-                                        let _ = tokio::fs::remove_file(&part_path).await;
-                                    });
+                                    let path = self.archive_path(id, idx2);
+                                    cleanup_futures.push(tokio::fs::remove_file(path));
                                 }
                             }
+                            for path in &finalized_file_paths {
+                                cleanup_futures.push(tokio::fs::remove_file(path.clone()));
+                            }
                             futures_util::future::join_all(cleanup_futures).await;
-                            return Err(format!("Failed to decompress {}: {}", entry.relative_path, e));
+
+                            if let Some(tx) = transfer.completion_tx.take() {
+                                let _ = tx.send(Err(err_msg.clone()));
+                            }
+                            return Err(err_msg);
                         }
+
+                        // Archive consumed successfully — clean it up
+                        let _ = tokio::fs::remove_file(&archive_path).await;
                     }
                 }
             }
@@ -333,7 +368,6 @@ impl TransferReceiver {
             .join(format!("{}_{}.tar.gz", id, index))
     }
 
-
     /// Signal that the sender encountered an error for this transfer.
     /// Cleans up any partial state and notifies waiters with the error.
     /// Returns true if an active transfer was found and removed.
@@ -346,16 +380,16 @@ impl TransferReceiver {
 
         tracing::error!("Transfer error for {}: {}", id, error);
 
-        // Clean up partial files. Dropping writers releases file handles for deletion.
+        // Clean up temp files in .drift/. Dropping writers releases file handles first.
         let cleanup_futures = transfer.writers.into_iter().map(|(file_index, writer)| {
-            let part_path = writer.part_path().to_path_buf();
+            let temp_path = writer.temp_path().to_path_buf();
             drop(writer);
             async move {
-                if let Err(e) = tokio::fs::remove_file(&part_path).await {
+                if let Err(e) = tokio::fs::remove_file(&temp_path).await {
                     if e.kind() != std::io::ErrorKind::NotFound {
                         tracing::warn!(
-                            "Failed to remove partial file {} for transfer {}: {}",
-                            part_path.display(),
+                            "Failed to remove temp file {} for transfer {}: {}",
+                            temp_path.display(),
                             file_index,
                             e
                         );
@@ -364,20 +398,6 @@ impl TransferReceiver {
             }
         });
         futures_util::future::join_all(cleanup_futures).await;
-
-        // Exhaustive cleanup: delete any potentially lingering final archives in .drift/
-        let mut linger_futures = Vec::new();
-        for (idx, entry) in transfer.entries.iter().enumerate() {
-            if entry.is_dir {
-                let archive_path = self.archive_path(id, idx);
-                linger_futures.push(async move {
-                    let _ = tokio::fs::remove_file(&archive_path).await;
-                });
-            }
-        }
-        if !linger_futures.is_empty() {
-            futures_util::future::join_all(linger_futures).await;
-        }
 
         if let Some(tx) = transfer.completion_tx {
             let _ = tx.send(Err(error));
