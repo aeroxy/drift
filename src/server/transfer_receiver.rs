@@ -301,7 +301,9 @@ impl TransferReceiver {
                             for (idx2, entry2) in transfer.entries.iter().enumerate() {
                                 if entry2.is_dir {
                                     let path_to_remove = self.archive_path(id, idx2);
-                                    let part_path = path_to_remove.with_extension("gz.part");
+                                    let mut part_os = path_to_remove.as_os_str().to_owned();
+                                    part_os.push(".part");
+                                    let part_path = std::path::PathBuf::from(part_os);
                                     cleanup_futures.push(async move {
                                         let _ = tokio::fs::remove_file(&path_to_remove).await;
                                         let _ = tokio::fs::remove_file(&part_path).await;
