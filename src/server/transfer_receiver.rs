@@ -332,40 +332,23 @@ impl TransferReceiver {
         tracing::error!("Transfer error for {}: {}", id, error);
 
         // Clean up partial files. Dropping writers releases file handles for deletion.
-        for (file_index, writer) in transfer.writers {
+        let cleanup_futures = transfer.writers.into_iter().map(|(file_index, writer)| {
             let part_path = writer.part_path().to_path_buf();
             drop(writer);
-            match tokio::fs::remove_file(&part_path).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to remove partial file {} for transfer {}: {}",
-                        part_path.display(),
-                        file_index,
-                        e
-                    );
-                }
-            }
-        }
-
-        // Clean up .drift/ temp archives for directory transfers
-        for (idx, entry) in transfer.entries.iter().enumerate() {
-            if entry.is_dir {
-                let archive_path = self.archive_path(id, idx);
-                match tokio::fs::remove_file(&archive_path).await {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
+            async move {
+                if let Err(e) = tokio::fs::remove_file(&part_path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
                         tracing::warn!(
-                            "Failed to clean up archive {}: {}",
-                            archive_path.display(),
+                            "Failed to remove partial file {} for transfer {}: {}",
+                            part_path.display(),
+                            file_index,
                             e
                         );
                     }
                 }
             }
-        }
+        });
+        futures_util::future::join_all(cleanup_futures).await;
 
         if let Some(tx) = transfer.completion_tx {
             let _ = tx.send(Err(error));
