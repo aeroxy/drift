@@ -295,9 +295,18 @@ impl TransferReceiver {
                             archive_path,
                             dest_dir
                         );
-                        decompress::decompress_archive(&archive_path, &dest_dir).map_err(|e| {
-                            format!("Failed to decompress {}: {}", entry.relative_path, e)
-                        })?;
+                        if let Err(e) = decompress::decompress_archive(&archive_path, &dest_dir) {
+                            // Decompression failed — clean up all remaining archives in this transfer
+                            for (idx2, entry2) in transfer.entries.iter().enumerate() {
+                                if entry2.is_dir {
+                                    let path_to_remove = self.archive_path(id, idx2);
+                                    let _ = std::fs::remove_file(&path_to_remove);
+                                    let part_path = path_to_remove.with_extension("gz.part");
+                                    let _ = std::fs::remove_file(&part_path);
+                                }
+                            }
+                            return Err(format!("Failed to decompress {}: {}", entry.relative_path, e));
+                        }
                     }
                 }
             }
@@ -349,6 +358,20 @@ impl TransferReceiver {
             }
         });
         futures_util::future::join_all(cleanup_futures).await;
+
+        // Exhaustive cleanup: delete any potentially lingering final archives in .drift/
+        let mut linger_futures = Vec::new();
+        for (idx, entry) in transfer.entries.iter().enumerate() {
+            if entry.is_dir {
+                let archive_path = self.archive_path(id, idx);
+                linger_futures.push(async move {
+                    let _ = tokio::fs::remove_file(&archive_path).await;
+                });
+            }
+        }
+        if !linger_futures.is_empty() {
+            futures_util::future::join_all(linger_futures).await;
+        }
 
         if let Some(tx) = transfer.completion_tx {
             let _ = tx.send(Err(error));

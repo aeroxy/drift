@@ -121,26 +121,28 @@ pub async fn handle_browser_transfer(
                 Direction::Pull => {
                     let done_rx = pull_done_rx.expect("pull_done_rx set above for Pull");
 
-                    match tokio::time::timeout(std::time::Duration::from_secs(1800), done_rx).await
-                    {
-                        Ok(Ok(Ok(()))) => {
-                            tracing::info!("Pull transfer complete: {}", id);
-                            let _ = ws_tx.send(Message::Text(
-                                serde_json::to_string(&ControlMessage::TransferComplete {
-                                    id,
-                                    total_bytes: 0,
-                                })
-                                .unwrap()
-                                .into(),
-                            ));
-                        }
-                        Ok(Ok(Err(error))) => {
-                            send_error(&ws_tx, id, &error);
-                        }
-                        Ok(Err(_)) => {
+                    let wait_result = tokio::time::timeout(std::time::Duration::from_secs(1800), done_rx).await;
+                    match wait_result {
+                        Err(_) => send_error(&ws_tx, id, "Pull transfer timed out"),
+                        Ok(Err(_recv_err)) => {
                             send_error(&ws_tx, id, "Pull transfer channel closed unexpectedly")
                         }
-                        Err(_) => send_error(&ws_tx, id, "Pull transfer timed out"),
+                        Ok(Ok(transfer_result)) => match transfer_result {
+                            Ok(()) => {
+                                tracing::info!("Pull transfer complete: {}", id);
+                                let _ = ws_tx.send(Message::Text(
+                                    serde_json::to_string(&ControlMessage::TransferComplete {
+                                        id,
+                                        total_bytes: 0,
+                                    })
+                                    .unwrap()
+                                    .into(),
+                                ));
+                            }
+                            Err(error) => {
+                                send_error(&ws_tx, id, &error);
+                            }
+                        }
                     }
                 }
             }
@@ -393,24 +395,8 @@ async fn push_entries(
     );
 
     // Wait for the remote to confirm receipt before telling the browser
-    match tokio::time::timeout(std::time::Duration::from_secs(300), done_rx).await {
-        Ok(Ok(Ok(()))) => {
-            tracing::info!("Push verified complete: {} ({} bytes)", id, total_sent);
-            let _ = ws_tx.send(Message::Text(
-                serde_json::to_string(&ControlMessage::TransferComplete {
-                    id,
-                    total_bytes: total_sent,
-                })
-                .unwrap()
-                .into(),
-            ));
-        }
-        Ok(Ok(Err(error))) => {
-            send_error(ws_tx, id, &error);
-        }
-        Ok(Err(_)) => {
-            send_error(ws_tx, id, "Remote completion channel closed unexpectedly");
-        }
+    let wait_result = tokio::time::timeout(std::time::Duration::from_secs(300), done_rx).await;
+    match wait_result {
         Err(_) => {
             state.pending_completions.lock().await.remove(&id);
             send_error(
@@ -418,6 +404,25 @@ async fn push_entries(
                 id,
                 "Remote did not confirm transfer within 5 minutes",
             );
+        }
+        Ok(Err(_recv_err)) => {
+            send_error(ws_tx, id, "Remote completion channel closed unexpectedly");
+        }
+        Ok(Ok(transfer_result)) => match transfer_result {
+            Ok(()) => {
+                tracing::info!("Push verified complete: {} ({} bytes)", id, total_sent);
+                let _ = ws_tx.send(Message::Text(
+                    serde_json::to_string(&ControlMessage::TransferComplete {
+                        id,
+                        total_bytes: total_sent,
+                    })
+                    .unwrap()
+                    .into(),
+                ));
+            }
+            Err(error) => {
+                send_error(ws_tx, id, &error);
+            }
         }
     }
 
