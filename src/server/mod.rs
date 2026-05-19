@@ -73,6 +73,25 @@ impl AppState {
             last_password,
         }
     }
+
+    /// Handle an incoming TransferError message.
+    /// Returns true if the error was consumed (active transfer or pending completion found).
+    /// Returns false if no matching transfer exists — caller should fall through to the
+    /// generic FIFO response handler (likely a synchronous rejection of a TransferRequest).
+    pub async fn handle_transfer_error(&self, id: Uuid, error: &str) -> bool {
+        if self
+            .transfer_receiver
+            .signal_error(id, error.to_owned())
+            .await
+        {
+            return true;
+        }
+        if let Some(tx) = self.pending_completions.lock().await.remove(&id) {
+            let _ = tx.send(Err(error.to_owned()));
+            return true;
+        }
+        false
+    }
 }
 
 /// Tear down the current remote connection (if any) from either side.
