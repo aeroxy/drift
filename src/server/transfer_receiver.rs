@@ -259,33 +259,53 @@ impl TransferReceiver {
             let has_dirs = transfer.has_dirs;
             let file_count = transfer.writers.len();
 
-            // Collect final paths for non-dir entries so we can roll them back on
-            // decompression failure. We must do this before draining the writers.
-            let finalized_file_paths: Vec<PathBuf> = if has_dirs {
-                transfer
-                    .writers
-                    .iter()
-                    .filter_map(|(&idx, writer)| {
-                        let entry = transfer.entries.get(idx as usize)?;
-                        if entry.is_dir {
-                            None
-                        } else {
-                            Some(writer.final_path().to_path_buf())
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            // Collect all potential temp paths and final destination paths for atomic rollback.
+            // We must collect these before draining transfer.writers.
+            let mut temp_paths = Vec::new();
+            let mut dest_paths = Vec::new();
+            for (&idx, writer) in &transfer.writers {
+                let entry = transfer.entries.get(idx as usize);
+                if entry.map(|e| e.is_dir).unwrap_or(false) {
+                    temp_paths.push(writer.temp_path().to_path_buf());
+                } else {
+                    temp_paths.push(writer.temp_path().to_path_buf());
+                    dest_paths.push(writer.final_path().to_path_buf());
+                }
+            }
+
+            // Ensure any directories that didn't have writers open are also handled
+            for (idx, entry) in transfer.entries.iter().enumerate() {
+                if entry.is_dir {
+                    let path = self.archive_path(id, idx);
+                    if !temp_paths.contains(&path) {
+                        temp_paths.push(path);
+                    }
+                }
+            }
 
             // Finalize all writers (take ownership from HashMap).
             // For regular files this renames .drift/temp → destination.
             // For directories this is a no-op rename (archive stays in .drift/).
+            let mut finalize_failed = false;
+            let mut finalize_err = String::new();
             for (file_index, writer) in transfer.writers.drain() {
-                writer
-                    .finalize()
-                    .await
-                    .map_err(|e| format!("Failed to finalize file {}: {}", file_index, e))?;
+                if let Err(e) = writer.finalize().await {
+                    finalize_failed = true;
+                    finalize_err = format!("Failed to finalize file {}: {}", file_index, e);
+                    break;
+                }
+            }
+
+            if finalize_failed {
+                // Finalization failed — clean up all temp files and any successfully finalized files
+                let mut rollback_paths = temp_paths;
+                rollback_paths.extend(dest_paths);
+                Self::remove_files(rollback_paths).await;
+
+                if let Some(tx) = transfer.completion_tx.take() {
+                    let _ = tx.send(Err(finalize_err.clone()));
+                }
+                return Err(finalize_err);
             }
 
             tracing::info!(
@@ -326,19 +346,10 @@ impl TransferReceiver {
                                 "Failed to decompress {}: {}", entry.relative_path, e
                             );
 
-                            // Roll back the entire transfer: remove all archives still
-                            // in .drift/ and any regular files already moved to dest.
-                            let mut cleanup_futures = Vec::new();
-                            for (idx2, entry2) in transfer.entries.iter().enumerate() {
-                                if entry2.is_dir {
-                                    let path = self.archive_path(id, idx2);
-                                    cleanup_futures.push(tokio::fs::remove_file(path));
-                                }
-                            }
-                            for path in &finalized_file_paths {
-                                cleanup_futures.push(tokio::fs::remove_file(path.clone()));
-                            }
-                            futures_util::future::join_all(cleanup_futures).await;
+                            // Decompression failed — clean up all temp files and any regular files already moved
+                            let mut rollback_paths = temp_paths;
+                            rollback_paths.extend(dest_paths);
+                            Self::remove_files(rollback_paths).await;
 
                             if let Some(tx) = transfer.completion_tx.take() {
                                 let _ = tx.send(Err(err_msg.clone()));
@@ -368,6 +379,19 @@ impl TransferReceiver {
             .join(format!("{}_{}.tar.gz", id, index))
     }
 
+    /// Remove a list of files concurrently, logging warnings for unexpected errors.
+    /// NotFound is silently ignored (the file may never have been created).
+    async fn remove_files(paths: Vec<PathBuf>) {
+        let futs = paths.into_iter().map(|p| async move {
+            if let Err(e) = tokio::fs::remove_file(&p).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Cleanup: failed to remove {}: {}", p.display(), e);
+                }
+            }
+        });
+        futures_util::future::join_all(futs).await;
+    }
+
     /// Signal that the sender encountered an error for this transfer.
     /// Cleans up any partial state and notifies waiters with the error.
     /// Returns true if an active transfer was found and removed.
@@ -380,24 +404,17 @@ impl TransferReceiver {
 
         tracing::error!("Transfer error for {}: {}", id, error);
 
-        // Clean up temp files in .drift/. Dropping writers releases file handles first.
-        let cleanup_futures = transfer.writers.into_iter().map(|(file_index, writer)| {
-            let temp_path = writer.temp_path().to_path_buf();
-            drop(writer);
-            async move {
-                if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        tracing::warn!(
-                            "Failed to remove temp file {} for transfer {}: {}",
-                            temp_path.display(),
-                            file_index,
-                            e
-                        );
-                    }
-                }
-            }
-        });
-        futures_util::future::join_all(cleanup_futures).await;
+        // Collect temp paths, then drop writers to release file handles before deletion.
+        let paths: Vec<PathBuf> = transfer
+            .writers
+            .into_iter()
+            .map(|(_, writer)| {
+                let p = writer.temp_path().to_path_buf();
+                drop(writer);
+                p
+            })
+            .collect();
+        Self::remove_files(paths).await;
 
         if let Some(tx) = transfer.completion_tx {
             let _ = tx.send(Err(error));
