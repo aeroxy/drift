@@ -127,21 +127,19 @@ pub async fn handle_browser_transfer(
                         Ok(Err(_recv_err)) => {
                             send_error(&ws_tx, id, "Pull transfer channel closed unexpectedly")
                         }
-                        Ok(Ok(transfer_result)) => match transfer_result {
-                            Ok(total_bytes) => {
-                                tracing::info!("Pull transfer complete: {}", id);
-                                let _ = ws_tx.send(Message::Text(
-                                    serde_json::to_string(&ControlMessage::TransferComplete {
-                                        id,
-                                        total_bytes,
-                                    })
-                                    .unwrap()
-                                    .into(),
-                                ));
-                            }
-                            Err(error) => {
-                                send_error(&ws_tx, id, &error);
-                            }
+                        Ok(Ok(Err(error))) => {
+                            send_error(&ws_tx, id, &error);
+                        }
+                        Ok(Ok(Ok(total_bytes))) => {
+                            tracing::info!("Pull transfer complete: {}", id);
+                            let _ = ws_tx.send(Message::Text(
+                                serde_json::to_string(&ControlMessage::TransferComplete {
+                                    id,
+                                    total_bytes,
+                                })
+                                .unwrap()
+                                .into(),
+                            ));
                         }
                     }
                 }
@@ -408,21 +406,19 @@ async fn push_entries(
         Ok(Err(_recv_err)) => {
             send_error(ws_tx, id, "Remote completion channel closed unexpectedly");
         }
-        Ok(Ok(transfer_result)) => match transfer_result {
-            Ok(()) => {
-                tracing::info!("Push verified complete: {} ({} bytes)", id, total_sent);
-                let _ = ws_tx.send(Message::Text(
-                    serde_json::to_string(&ControlMessage::TransferComplete {
-                        id,
-                        total_bytes: total_sent,
-                    })
-                    .unwrap()
-                    .into(),
-                ));
-            }
-            Err(error) => {
-                send_error(ws_tx, id, &error);
-            }
+        Ok(Ok(Err(error))) => {
+            send_error(ws_tx, id, &error);
+        }
+        Ok(Ok(Ok(()))) => {
+            tracing::info!("Push verified complete: {} ({} bytes)", id, total_sent);
+            let _ = ws_tx.send(Message::Text(
+                serde_json::to_string(&ControlMessage::TransferComplete {
+                    id,
+                    total_bytes: total_sent,
+                })
+                .unwrap()
+                .into(),
+            ));
         }
     }
 
