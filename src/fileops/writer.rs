@@ -69,7 +69,9 @@ impl ChunkedWriter {
     pub async fn finalize(mut self) -> Result<(), std::io::Error> {
         self.file.flush().await?;
         drop(self.file);
-        tokio::fs::rename(&self.temp_path, &self.final_path).await?;
+        if self.temp_path != self.final_path {
+            tokio::fs::rename(&self.temp_path, &self.final_path).await?;
+        }
         Ok(())
     }
 
