@@ -289,10 +289,7 @@ impl TransferReceiver {
 
                 for (idx, entry) in transfer.entries.iter().enumerate() {
                     if entry.is_dir {
-                        let archive_path = self
-                            .root_dir
-                            .join(".drift")
-                            .join(format!("{}_{}.tar.gz", id, idx));
+                        let archive_path = self.archive_path(id, idx);
                         tracing::info!(
                             "Decompressing archive {:?} to {:?}",
                             archive_path,
@@ -315,6 +312,13 @@ impl TransferReceiver {
     }
 
     #[allow(dead_code)]
+    /// Path to the temporary tar.gz archive for a directory entry in a transfer.
+    fn archive_path(&self, id: Uuid, index: usize) -> std::path::PathBuf {
+        self.root_dir
+            .join(".drift")
+            .join(format!("{}_{}.tar.gz", id, index))
+    }
+
     pub async fn abort_transfer(&self, id: Uuid) {
         self.active_transfers.lock().await.remove(&id);
         tracing::warn!("Transfer aborted: {}", id);
@@ -353,10 +357,7 @@ impl TransferReceiver {
         // Clean up .drift/ temp archives for directory transfers
         for (idx, entry) in transfer.entries.iter().enumerate() {
             if entry.is_dir {
-                let archive_path = self
-                    .root_dir
-                    .join(".drift")
-                    .join(format!("{}_{}.tar.gz", id, idx));
+                let archive_path = self.archive_path(id, idx);
                 match tokio::fs::remove_file(&archive_path).await {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
