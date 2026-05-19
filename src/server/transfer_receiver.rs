@@ -311,7 +311,6 @@ impl TransferReceiver {
         Ok(())
     }
 
-    #[allow(dead_code)]
     /// Path to the temporary tar.gz archive for a directory entry in a transfer.
     fn archive_path(&self, id: Uuid, index: usize) -> std::path::PathBuf {
         self.root_dir
@@ -319,10 +318,6 @@ impl TransferReceiver {
             .join(format!("{}_{}.tar.gz", id, index))
     }
 
-    pub async fn abort_transfer(&self, id: Uuid) {
-        self.active_transfers.lock().await.remove(&id);
-        tracing::warn!("Transfer aborted: {}", id);
-    }
 
     /// Signal that the sender encountered an error for this transfer.
     /// Cleans up any partial state and notifies waiters with the error.
