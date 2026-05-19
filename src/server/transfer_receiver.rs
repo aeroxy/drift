@@ -337,21 +337,17 @@ impl TransferReceiver {
             }
 
             // Collect .drift/ temp archives for directory transfers
-            let archive_paths: Vec<std::path::PathBuf> = if transfer.has_dirs {
-                transfer
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, _entry)| {
-                        self.root_dir
-                            .join(".drift")
-                            .join(format!("{}_{}.tar.gz", id, idx))
-                    })
-                    .filter(|p| p.exists())
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let archive_paths: Vec<std::path::PathBuf> = transfer
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.is_dir)
+                .map(|(idx, _entry)| {
+                    self.root_dir
+                        .join(".drift")
+                        .join(format!("{}_{}.tar.gz", id, idx))
+                })
+                .collect();
 
             let completion_tx = transfer.completion_tx;
             drop(active);
@@ -369,12 +365,16 @@ impl TransferReceiver {
             }
 
             for archive_path in archive_paths {
-                if let Err(e) = tokio::fs::remove_file(&archive_path).await {
-                    tracing::warn!(
-                        "Failed to clean up archive {}: {}",
-                        archive_path.display(),
-                        e
-                    );
+                match tokio::fs::remove_file(&archive_path).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to clean up archive {}: {}",
+                            archive_path.display(),
+                            e
+                        );
+                    }
                 }
             }
 
