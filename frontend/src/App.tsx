@@ -518,6 +518,7 @@ export default function App() {
           transfers={[]}
           loading={false}
           fetchSuggestions={fetchRemoteSuggestions}
+          onTabComplete={handleRemoteNavigateTo}
         />
       </div>
     </div>
