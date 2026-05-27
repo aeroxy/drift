@@ -8,9 +8,10 @@ interface PathBarProps {
   onRefresh: () => void;
   onNavigateTo: (absolutePath: string) => void;
   fetchSuggestions?: (input: string) => Promise<string[]>;
+  onTabComplete?: (input: string) => void;
 }
 
-export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions }: PathBarProps) {
+export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions, onTabComplete }: PathBarProps & { onTabComplete?: (input: string) => void }) {
   const [inputValue, setInputValue] = useState(cwd);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -64,6 +65,9 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
       const selected = activeIndex >= 0 ? suggestions[activeIndex] : suggestions[0];
       setInputValue(selected + "/");
       setActiveIndex(-1);
+    } else if (e.key === "Tab" && suggestions.length === 0 && onTabComplete) {
+      e.preventDefault();
+      onTabComplete(inputValue);
     }
   };
 
