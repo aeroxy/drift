@@ -11,7 +11,7 @@ interface PathBarProps {
   onTabComplete?: (input: string) => void;
 }
 
-export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions, onTabComplete }: PathBarProps & { onTabComplete?: (input: string) => void }) {
+export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions, onTabComplete }: PathBarProps) {
   const [inputValue, setInputValue] = useState(cwd);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
