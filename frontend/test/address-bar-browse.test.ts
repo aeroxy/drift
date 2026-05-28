@@ -1,0 +1,299 @@
+/**
+ * address-bar-browse.test.ts
+ *
+ * Integration tests for the address bar browsing features:
+ * 1. /api/browse-remote REST endpoint — fetches remote directory entries via REST
+ *    without WS side effects (for suggestion autocomplete)
+ * 2. /api/browse path normalization — absolute paths are handled correctly
+ *    relative to root_dir
+ * 3. Cached suggestions — both local and remote panels return entries from cache
+ *    when browsing the current cwd
+ */
+import { describe, it, beforeAll, afterAll, expect } from 'vitest';
+import * as path from 'path';
+import * as fs from 'fs';
+import { getAvailablePort } from './helpers/ports.js';
+import { DriftProcess } from './helpers/drift-process.js';
+import { WsBrowserClient } from './helpers/ws-client.js';
+import type { FileEntry } from '../src/types/protocol.js';
+
+const PROJECT_ROOT = path.resolve(import.meta.dirname, '../../');
+const TEST_RESOURCES = path.join(PROJECT_ROOT, 'test-resources');
+const TEST_RESOURCES_BAK = path.join(PROJECT_ROOT, 'test-resources-bak');
+
+interface BrowseResponse {
+  hostname: string;
+  cwd: string;
+  entries: FileEntry[];
+}
+
+interface InfoResponse {
+  hostname: string;
+  root_dir: string;
+  has_remote: boolean;
+}
+
+async function pollForRemote(baseUrl: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/info`);
+      const info: InfoResponse = await res.json();
+      if (info.has_remote) return;
+    } catch {
+      // not ready yet
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`Remote not connected within ${timeoutMs}ms`);
+}
+
+describe('address bar browse', () => {
+  let host: DriftProcess;
+  let client: DriftProcess;
+  let hostWs: WsBrowserClient;
+  let clientWs: WsBrowserClient;
+
+  beforeAll(async () => {
+    if (!fs.existsSync(TEST_RESOURCES)) {
+      throw new Error(
+        'test-resources/ not found. Create test-resources/host/ (with a subdirectory) ' +
+        'and test-resources/client/ (with files) before running tests.'
+      );
+    }
+
+    if (fs.existsSync(TEST_RESOURCES_BAK)) {
+      fs.rmSync(TEST_RESOURCES_BAK, { recursive: true, force: true });
+    }
+    fs.cpSync(TEST_RESOURCES, TEST_RESOURCES_BAK, { recursive: true });
+
+    const hostPort = await getAvailablePort();
+    const clientPort = await getAvailablePort();
+
+    host = new DriftProcess({ port: hostPort, cwd: path.join(TEST_RESOURCES, 'host') });
+    client = new DriftProcess({
+      port: clientPort,
+      cwd: path.join(TEST_RESOURCES, 'client'),
+      target: `127.0.0.1:${hostPort}`,
+    });
+
+    await host.start();
+    await client.start();
+
+    await Promise.all([
+      pollForRemote(host.baseUrl),
+      pollForRemote(client.baseUrl),
+    ]);
+
+    hostWs = await WsBrowserClient.connect(host.wsUrl);
+    clientWs = await WsBrowserClient.connect(client.wsUrl);
+  }, 120_000);
+
+  afterAll(async () => {
+    hostWs?.close();
+    clientWs?.close();
+    await Promise.all([host?.stop(), client?.stop()]);
+
+    try {
+      fs.rmSync(TEST_RESOURCES, { recursive: true, force: true });
+      if (fs.existsSync(TEST_RESOURCES_BAK)) {
+        fs.renameSync(TEST_RESOURCES_BAK, TEST_RESOURCES);
+      }
+    } catch (err) {
+      console.error('Failed to restore test-resources:', err);
+    }
+  }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // /api/browse-remote endpoint
+  // -------------------------------------------------------------------------
+
+  describe('/api/browse-remote', () => {
+    it('returns remote directory entries via REST', async () => {
+      const res = await fetch(`${client.baseUrl}/api/browse-remote?path=.`);
+      expect(res.ok).toBe(true);
+      const data: BrowseResponse = await res.json();
+      expect(data.hostname).toBeTruthy();
+      expect(data.cwd).toBeTruthy();
+      expect(Array.isArray(data.entries)).toBe(true);
+    });
+
+    it('returns the same entries as a WS BrowseRequest to the remote', async () => {
+      // Get entries via REST (client browses remote = host's files)
+      const restRes = await fetch(`${client.baseUrl}/api/browse-remote?path=.`);
+      const restData: BrowseResponse = await restRes.json();
+
+      // Get entries via WS — client sends BrowseRequest which gets forwarded to host
+      const wsPromise = clientWs.waitForMessage(
+        (m) => m.type === 'BrowseResponse',
+        10_000,
+      );
+      clientWs.send({ type: 'BrowseRequest', path: '.' });
+      const wsMsg = await wsPromise;
+
+      if (wsMsg.type === 'BrowseResponse') {
+        expect(wsMsg.entries.length).toBe(restData.entries.length);
+        const restNames = restData.entries.map((e) => e.name).sort();
+        const wsNames = wsMsg.entries.map((e) => e.name).sort();
+        expect(restNames).toEqual(wsNames);
+      }
+    });
+
+    it('can browse subdirectories on the remote', async () => {
+      // First get root entries to find a subdirectory
+      const rootRes = await fetch(`${client.baseUrl}/api/browse-remote?path=.`);
+      const rootData: BrowseResponse = await rootRes.json();
+      const subdir = rootData.entries.find((e) => e.is_dir);
+      if (!subdir) {
+        // No subdirectory to test — skip gracefully
+        return;
+      }
+
+      const subRes = await fetch(
+        `${client.baseUrl}/api/browse-remote?path=${encodeURIComponent(subdir.name)}`,
+      );
+      expect(subRes.ok).toBe(true);
+      const subData: BrowseResponse = await subRes.json();
+      expect(subData.cwd).toContain(subdir.name);
+      expect(Array.isArray(subData.entries)).toBe(true);
+    });
+
+    it('returns 400 when no remote connection exists', async () => {
+      // Start a standalone server with no target
+      const standalonePort = await getAvailablePort();
+      const standalone = new DriftProcess({
+        port: standalonePort,
+        cwd: path.join(TEST_RESOURCES, 'host'),
+      });
+      await standalone.start();
+
+      try {
+        const res = await fetch(`${standalone.baseUrl}/api/browse-remote?path=.`);
+        expect(res.ok).toBe(false);
+        expect(res.status).toBe(400);
+      } finally {
+        await standalone.stop();
+      }
+    });
+
+    it('does not update the remote panel state (silent)', async () => {
+      // Capture current remote state via /api/info
+      const infoBefore = await (await fetch(`${client.baseUrl}/api/info`)).json();
+
+      // Browse a remote subdirectory via REST
+      const browseRes = await fetch(`${client.baseUrl}/api/browse-remote?path=.`);
+      expect(browseRes.ok).toBe(true);
+
+      // Remote state should be unchanged — /api/info still shows same connection
+      const infoAfter = await (await fetch(`${client.baseUrl}/api/info`)).json();
+      expect(infoAfter.has_remote).toBe(infoBefore.has_remote);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // /api/browse path normalization
+  // -------------------------------------------------------------------------
+
+  describe('/api/browse path normalization', () => {
+    it('accepts relative paths', async () => {
+      const res = await fetch(`${host.baseUrl}/api/browse?path=.`);
+      expect(res.ok).toBe(true);
+      const data: BrowseResponse = await res.json();
+      expect(data.entries.length).toBeGreaterThan(0);
+    });
+
+    it('accepts absolute paths within root_dir', async () => {
+      // First get the root_dir from /api/info
+      const info: InfoResponse = await (await fetch(`${host.baseUrl}/api/info`)).json();
+      const rootDir = info.root_dir;
+
+      // Browse root_dir as an absolute path
+      const res = await fetch(
+        `${host.baseUrl}/api/browse?path=${encodeURIComponent(rootDir)}`,
+      );
+      expect(res.ok).toBe(true);
+      const data: BrowseResponse = await res.json();
+      expect(data.entries.length).toBeGreaterThan(0);
+    });
+
+    it('rejects paths outside root_dir with 400', async () => {
+      const res = await fetch(
+        `${host.baseUrl}/api/browse?path=${encodeURIComponent('/tmp')}`,
+      );
+      expect(res.ok).toBe(false);
+      expect(res.status).toBe(400);
+    });
+
+    it('returns cwd in the response', async () => {
+      const res = await fetch(`${host.baseUrl}/api/browse?path=.`);
+      const data: BrowseResponse = await res.json();
+      expect(data.cwd).toBeTruthy();
+      expect(path.isAbsolute(data.cwd)).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Cached suggestions
+  // -------------------------------------------------------------------------
+
+  describe('cached suggestions', () => {
+    it('local browse returns consistent entries for the same path', async () => {
+      // Browse the same path twice — should get identical results
+      const res1 = await fetch(`${host.baseUrl}/api/browse?path=.`);
+      const data1: BrowseResponse = await res1.json();
+
+      const res2 = await fetch(`${host.baseUrl}/api/browse?path=.`);
+      const data2: BrowseResponse = await res2.json();
+
+      const names1 = data1.entries.map((e) => e.name).sort();
+      const names2 = data2.entries.map((e) => e.name).sort();
+      expect(names1).toEqual(names2);
+    });
+
+    it('remote browse-remote returns consistent entries for the same path', async () => {
+      const res1 = await fetch(`${client.baseUrl}/api/browse-remote?path=.`);
+      const data1: BrowseResponse = await res1.json();
+
+      const res2 = await fetch(`${client.baseUrl}/api/browse-remote?path=.`);
+      const data2: BrowseResponse = await res2.json();
+
+      const names1 = data1.entries.map((e) => e.name).sort();
+      const names2 = data2.entries.map((e) => e.name).sort();
+      expect(names1).toEqual(names2);
+    });
+
+    it('entries include is_dir, size, and modified fields', async () => {
+      const res = await fetch(`${host.baseUrl}/api/browse?path=.`);
+      const data: BrowseResponse = await res.json();
+
+      for (const entry of data.entries) {
+        expect(typeof entry.name).toBe('string');
+        expect(typeof entry.is_dir).toBe('boolean');
+        expect(typeof entry.size).toBe('number');
+        expect(typeof entry.modified).toBe('number');
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // WS BrowseRequest still works for navigation
+  // -------------------------------------------------------------------------
+
+  describe('WS BrowseRequest for navigation', () => {
+    it('BrowseRequest via WS returns entries', async () => {
+      // Use clientWs — BrowseRequest gets forwarded to the remote (host)
+      const response = clientWs.waitForMessage(
+        (m) => m.type === 'BrowseResponse',
+        10_000,
+      );
+      clientWs.send({ type: 'BrowseRequest', path: '.' });
+      const msg = await response;
+      expect(msg.type).toBe('BrowseResponse');
+      if (msg.type === 'BrowseResponse') {
+        expect(msg.entries.length).toBeGreaterThan(0);
+        expect(msg.hostname).toBeTruthy();
+        expect(msg.cwd).toBeTruthy();
+      }
+    });
+  });
+});
