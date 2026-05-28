@@ -9,9 +9,10 @@ import type { SelectModifiers } from "./components/FileRow";
 
 export default function App() {
   // Local state
-  const [localInfo, setLocalInfo] = useState<{ hostname: string; cwd: string }>({
+  const [localInfo, setLocalInfo] = useState<{ hostname: string; cwd: string; rootDir: string }>({
     hostname: "...",
     cwd: "...",
+    rootDir: "",
   });
   const [localEntries, setLocalEntries] = useState<FileEntry[]>([]);
   const [localPath, setLocalPath] = useState(".");
@@ -47,6 +48,7 @@ export default function App() {
   // null after refreshes/path-changes so the next click re-establishes the anchor.
   const lastClickedLocalRef = useRef<number | null>(null);
   const lastClickedRemoteRef = useRef<number | null>(null);
+  const localRootDirRef = useRef("");
 
   const { transfers, startTransfer, updateProgress, completeTransfer, failTransfer, hasActiveTransfers } = useTransfer();
 
@@ -54,10 +56,15 @@ export default function App() {
   const fetchLocal = useCallback(async (path: string): Promise<boolean> => {
     setLocalLoading(true);
     try {
-      const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+      const root = localRootDirRef.current;
+      let relative = path;
+      if (root && path.startsWith(root)) {
+        relative = path.slice(root.length).replace(/^\//, "");
+      }
+      const res = await fetch(`/api/browse?path=${encodeURIComponent(relative)}`);
       if (res.ok) {
         const data: BrowseResponse = await res.json();
-        setLocalInfo({ hostname: data.hostname, cwd: data.cwd });
+        setLocalInfo({ hostname: data.hostname, cwd: data.cwd, rootDir: localRootDirRef.current });
         setLocalEntries(data.entries);
         setLocalSelected(new Set());
         lastClickedLocalRef.current = null;
@@ -78,6 +85,8 @@ export default function App() {
       setFingerprint(info.fingerprint ?? null);
       setCanReconnect(info.can_reconnect);
       setLastTarget(info.last_target);
+      localRootDirRef.current = info.root_dir;
+      setLocalInfo((prev) => ({ ...prev, rootDir: info.root_dir }));
       if (!info.has_remote) {
         setRemoteEntries([]);
         setRemoteInfo({ hostname: "...", cwd: "..." });
@@ -306,9 +315,13 @@ export default function App() {
 
   const handleLocalNavigateTo = useCallback(
     async (absolutePath: string) => {
-      const success = await fetchLocal(absolutePath);
+      const root = localRootDirRef.current;
+      const relative = root && absolutePath.startsWith(root)
+        ? absolutePath.slice(root.length).replace(/^\//, "")
+        : absolutePath;
+      const success = await fetchLocal(relative);
       if (success) {
-        setLocalPath(absolutePath);
+        setLocalPath(relative);
       } else {
         setError(`Path not found: ${absolutePath}`);
         setTimeout(() => setError(null), 5000);
@@ -330,8 +343,26 @@ export default function App() {
     const lastSlash = inputValue.lastIndexOf("/");
     const parentDir = lastSlash > 0 ? inputValue.slice(0, lastSlash) : "/";
     const prefix = inputValue.slice(lastSlash + 1).toLowerCase();
+    const root = localRootDirRef.current;
+    // Use cached entries when browsing the current local cwd
+    if (parentDir === localInfo.cwd || inputValue === localInfo.cwd) {
+      return localEntries
+        .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
+        .map((e) => `${localInfo.cwd}/${e.name}`);
+    }
+    let relParent: string;
+    if (root && parentDir.startsWith(root)) {
+      relParent = parentDir.slice(root.length).replace(/^\//, "") || ".";
+    } else if (root && inputValue.startsWith(root)) {
+      // inputValue is at or below root_dir, but parentDir is outside — browse root_dir
+      relParent = ".";
+    } else if (root) {
+      return []; // completely outside root_dir — no suggestions
+    } else {
+      relParent = parentDir;
+    }
     try {
-      const res = await fetch(`/api/browse?path=${encodeURIComponent(parentDir)}`);
+      const res = await fetch(`/api/browse?path=${encodeURIComponent(relParent)}`);
       if (!res.ok) return [];
       const data: BrowseResponse = await res.json();
       return data.entries
@@ -340,20 +371,31 @@ export default function App() {
     } catch {
       return [];
     }
-  }, []);
+  }, [localInfo.cwd, localEntries]);
 
-  // Remote suggestions come from the already-fetched remoteEntries for the current directory.
-  // Only suggests when the typed parent dir matches the currently viewed remote directory.
+  // Remote suggestions — fetch from remote server via REST (no WS side effects)
   const fetchRemoteSuggestions = useCallback(async (inputValue: string): Promise<string[]> => {
-    if (!remoteInfo.cwd || remoteInfo.cwd === "...") return [];
+    if (!connected || !hasRemote) return [];
     const lastSlash = inputValue.lastIndexOf("/");
     const parentDir = lastSlash > 0 ? inputValue.slice(0, lastSlash) : "/";
     const prefix = inputValue.slice(lastSlash + 1).toLowerCase();
-    if (parentDir !== remoteInfo.cwd) return [];
-    return remoteEntries
-      .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
-      .map((e) => `${remoteInfo.cwd}/${e.name}`);
-  }, [remoteEntries, remoteInfo.cwd]);
+    // Use cached entries when browsing the current remote cwd
+    if (parentDir === remoteInfo.cwd || inputValue === remoteInfo.cwd) {
+      return remoteEntries
+        .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
+        .map((e) => `${remoteInfo.cwd}/${e.name}`);
+    }
+    try {
+      const res = await fetch(`/api/browse-remote?path=${encodeURIComponent(parentDir)}`);
+      if (!res.ok) return [];
+      const data: BrowseResponse = await res.json();
+      return data.entries
+        .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
+        .map((e) => `${data.cwd}/${e.name}`);
+    } catch {
+      return [];
+    }
+  }, [connected, hasRemote, remoteInfo.cwd, remoteEntries]);
 
   // Transfer actions
   const handleCopyToRemote = useCallback(() => {
@@ -518,7 +560,6 @@ export default function App() {
           transfers={[]}
           loading={false}
           fetchSuggestions={fetchRemoteSuggestions}
-          onTabComplete={handleRemoteNavigateTo}
         />
       </div>
     </div>

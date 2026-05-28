@@ -124,6 +124,7 @@ pub async fn run(state: Arc<AppState>, port: Option<u16>) -> anyhow::Result<()> 
     if !disable_ui {
         app = app
             .route("/api/browse", get(file_api::browse))
+            .route("/api/browse-remote", get(file_api::browse_remote))
             .route("/api/info", get(file_api::info))
             .route("/api/connect", axum::routing::post(file_api::connect))
             .route("/api/reconnect", axum::routing::post(file_api::reconnect))

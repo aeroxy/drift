@@ -1,6 +1,7 @@
 use axum::{
     Json,
     extract::{Query, State},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -47,6 +48,40 @@ pub async fn browse(
         cwd,
         entries,
     }))
+}
+
+pub async fn browse_remote(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<BrowseParams>,
+) -> Result<Json<BrowseResponse>, StatusCode> {
+    let remote = state.remote.read().await;
+    let remote_conn = remote.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
+
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    let msg = ControlMessage::BrowseRequest {
+        path: params.path.clone(),
+    };
+    remote_conn
+        .tx
+        .send((msg, response_tx))
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
+        Ok(Ok(ControlMessage::BrowseResponse {
+            hostname,
+            cwd,
+            entries,
+        })) => Ok(Json(BrowseResponse {
+            hostname,
+            cwd,
+            entries,
+        })),
+        Ok(Ok(ControlMessage::Error { message })) => {
+            tracing::warn!("Remote browse error: {}", message);
+            Err(StatusCode::BAD_REQUEST)
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
 }
 
 #[derive(Serialize)]

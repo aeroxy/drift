@@ -8,16 +8,22 @@ interface PathBarProps {
   onRefresh: () => void;
   onNavigateTo: (absolutePath: string) => void;
   fetchSuggestions?: (input: string) => Promise<string[]>;
-  onTabComplete?: (input: string) => void;
 }
 
-export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions, onTabComplete }: PathBarProps) {
+export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions }: PathBarProps) {
   const [inputValue, setInputValue] = useState(cwd);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [focused, setFocused] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  useEffect(() => {
+    if (activeIndex < 0 || !listRef.current) return;
+    const active = listRef.current.children[activeIndex] as HTMLElement | undefined;
+    active?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex]);
 
   // Sync input with cwd when not focused (folder clicks, navigation)
   useEffect(() => {
@@ -64,10 +70,8 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
       e.preventDefault();
       const selected = activeIndex >= 0 ? suggestions[activeIndex] : suggestions[0];
       setInputValue(selected + "/");
+      setSuggestions([]);
       setActiveIndex(-1);
-    } else if (e.key === "Tab" && suggestions.length === 0 && onTabComplete) {
-      e.preventDefault();
-      onTabComplete(inputValue);
     }
   };
 
@@ -82,12 +86,12 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          onFocus={(e) => { setFocused(true); e.target.select(); }}
+          onFocus={() => setFocused(true)}
           onBlur={() => { setFocused(false); reset(); }}
           className="w-full bg-transparent border border-transparent rounded px-2 py-0.5 font-mono text-xs text-zinc-300 focus:outline-none focus:border-zinc-600 focus:bg-zinc-900 focus:text-zinc-100 transition-colors"
         />
         {suggestions.length > 0 && focused && (
-          <ul className="absolute top-full left-0 right-0 z-50 mt-0.5 max-h-48 overflow-y-auto bg-zinc-900 border border-zinc-700 rounded shadow-xl">
+          <ul ref={listRef} className="absolute top-full left-0 right-0 z-50 mt-0.5 max-h-48 overflow-y-auto bg-zinc-900 border border-zinc-700 rounded shadow-xl">
             {suggestions.map((s, i) => (
               <li
                 key={s}
