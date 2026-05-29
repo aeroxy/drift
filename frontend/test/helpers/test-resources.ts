@@ -26,8 +26,15 @@ export function isolateTestResources(): string {
  * Remove the isolated test-resources copy created by `isolateTestResources()`.
  */
 export function cleanupIsolatedTestResources(isolatedDir: string): void {
-  // Walk up to the temp parent (.test-resources-XXXX/) and remove it entirely.
-  const parent = path.dirname(isolatedDir);
+  const resolved = path.resolve(isolatedDir);
+  const parent = path.dirname(resolved);
+  const isExpectedLayout =
+    path.basename(resolved) === 'test-resources' &&
+    path.basename(parent).startsWith('.test-resources-') &&
+    path.dirname(parent) === PROJECT_ROOT;
+
+  if (!isExpectedLayout) return;
+
   try {
     fs.rmSync(parent, { recursive: true, force: true });
   } catch {
