@@ -83,7 +83,9 @@ pub async fn browse_remote(
             tracing::warn!("Remote browse error: {}", message);
             Err(StatusCode::BAD_REQUEST)
         }
-        _ => Err(StatusCode::BAD_REQUEST),
+        Ok(Ok(_)) => Err(StatusCode::BAD_GATEWAY),
+        Ok(Err(_)) => Err(StatusCode::BAD_GATEWAY),
+        Err(_) => Err(StatusCode::GATEWAY_TIMEOUT),
     }
 }
 
