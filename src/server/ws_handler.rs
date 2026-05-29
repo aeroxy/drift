@@ -427,16 +427,20 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             .is_ok()
         {
             let state_clone = state.clone();
+            let pending_cleanup = pending.clone();
             tokio::spawn(async move {
-                if let Ok(Ok(ControlMessage::InfoResponse {
-                    hostname, root_dir, ..
-                })) =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await
-                {
-                    let mut remote = state_clone.remote.write().await;
-                    if let Some(ref mut remote_conn) = *remote {
-                        remote_conn.hostname = hostname;
-                        remote_conn.root_dir = root_dir;
+                match tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await {
+                    Ok(Ok(ControlMessage::InfoResponse {
+                        hostname, root_dir, ..
+                    })) => {
+                        let mut remote = state_clone.remote.write().await;
+                        if let Some(ref mut remote_conn) = *remote {
+                            remote_conn.hostname = hostname;
+                            remote_conn.root_dir = root_dir;
+                        }
+                    }
+                    _ => {
+                        pending_cleanup.lock().await.remove(&request_id);
                     }
                 }
             });
@@ -722,12 +726,12 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
             if let Some(request_id) = request_id {
                 pending_requests.lock().await.insert(request_id, response_tx);
             }
-            if request_tx.send(msg.clone()).is_ok() {
+            if request_tx.send(msg).is_ok() {
                 match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
                     Ok(Ok(response)) => return Some(response),
                     Ok(Err(_)) => {
                         return Some(ControlMessage::Error {
-                            request_id: None,
+                            request_id,
                             message: "Remote connection lost".to_string(),
                         });
                     }
@@ -736,7 +740,7 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
                             pending_requests.lock().await.remove(&request_id);
                         }
                         return Some(ControlMessage::Error {
-                            request_id: None,
+                            request_id,
                             message: "Remote timeout".to_string(),
                         });
                     }
@@ -747,15 +751,15 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
             }
             // tx.send failed: channel closed
             return Some(ControlMessage::Error {
-                request_id: None,
+                request_id,
                 message: "Remote connection lost".to_string(),
             });
         }
 
         // No remote — BrowseRequest must not fall through to local handling
-        if matches!(msg, ControlMessage::BrowseRequest { .. }) {
+        if let ControlMessage::BrowseRequest { request_id, .. } = &msg {
             return Some(ControlMessage::Error {
-                request_id: None,
+                request_id: *request_id,
                 message: "No remote connection".to_string(),
             });
         }

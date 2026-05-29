@@ -168,15 +168,22 @@ impl ControlMessage {
     /// Inject a correlation id into request variants that do not already have one.
     pub fn with_request_id(self, request_id: Uuid) -> Self {
         match self {
-            ControlMessage::BrowseRequest { path, .. } => ControlMessage::BrowseRequest {
-                request_id: Some(request_id),
+            ControlMessage::BrowseRequest {
+                request_id: existing,
+                path,
+            } => ControlMessage::BrowseRequest {
+                request_id: existing.or(Some(request_id)),
                 path,
             },
-            ControlMessage::InfoRequest { .. } => ControlMessage::InfoRequest {
-                request_id: Some(request_id),
+            ControlMessage::InfoRequest {
+                request_id: existing,
+            } => ControlMessage::InfoRequest {
+                request_id: existing.or(Some(request_id)),
             },
-            ControlMessage::Ping { .. } => ControlMessage::Ping {
-                request_id: Some(request_id),
+            ControlMessage::Ping {
+                request_id: existing,
+            } => ControlMessage::Ping {
+                request_id: existing.or(Some(request_id)),
             },
             other => other,
         }
