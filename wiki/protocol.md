@@ -10,10 +10,10 @@ Control messages are JSON, serialized with `serde` using `#[serde(tag = "type")]
 |---------|--------|-----------|---------|
 | `KeyExchange` | `public_key: String` (base64) | bidirectional | X25519 handshake |
 | `HandshakeComplete` | — | server→client | Signals encryption is ready |
-| `InfoRequest` | — | either→other | Request hostname + root_dir |
-| `InfoResponse` | `hostname`, `root_dir`, `has_remote` | response | Reply to InfoRequest |
-| `BrowseRequest` | `path: String` | either→other | List a directory |
-| `BrowseResponse` | `hostname`, `cwd`, `entries: Vec<FileEntry>` | response | Directory listing |
+| `InfoRequest` | `request_id?: Uuid` | either→other | Request hostname + root_dir |
+| `InfoResponse` | `request_id?: Uuid`, `hostname`, `root_dir`, `has_remote` | response | Reply to InfoRequest |
+| `BrowseRequest` | `request_id?: Uuid`, `path: String` | either→other | List a directory |
+| `BrowseResponse` | `request_id?: Uuid`, `hostname`, `cwd`, `entries: Vec<FileEntry>` | response | Directory listing |
 | `TransferRequest` | `id: Uuid`, `entries: Vec<TransferEntry>`, `direction: Direction` | initiator→remote | Start a transfer |
 | `TransferAccepted` | `id: Uuid`, `resume_offsets: HashMap<String, u64>` | remote→initiator | Accept and ready |
 | `TransferProgress` | `id`, `path`, `bytes_done`, `bytes_total` | sender→browser | Progress update |
@@ -21,8 +21,8 @@ Control messages are JSON, serialized with `serde` using `#[serde(tag = "type")]
 | `TransferFinalized` | `id: Uuid` | receiver→sender | Receiver has written and finalized all data |
 | `TransferError` | `id: Uuid`, `error: String` | either | Failure |
 | `ConnectionStatus` | `has_remote: bool` | server→browser | Pushed to browsers when remote connects/disconnects |
-| `Ping` / `Pong` | — | bidirectional | Keep-alive |
-| `Error` | `message: String` | either | Generic error |
+| `Ping` / `Pong` | `request_id?: Uuid` | bidirectional | Keep-alive |
+| `Error` | `request_id?: Uuid`, `message: String` | either | Generic error |
 
 ### Enum: `Direction`
 
@@ -88,9 +88,11 @@ decode_data_frame(payload)                   -> (Uuid, u64, &[u8])
 
 ## Request / Response Pattern
 
-`ControlMessage::is_request()` identifies messages that expect a response. Each side maintains a `HashMap<Uuid, oneshot::Sender<ControlMessage>>` (`pending`) to match responses back to callers.
+`ControlMessage::is_request()` identifies messages that expect a response. Each side maintains a `HashMap<Uuid, oneshot::Sender<ControlMessage>>` (`pending`) keyed by the protocol `request_id`.
 
-Requests are sent via `request_tx`, tagged with a generated UUID inserted into `pending`. Responses are matched against the oldest pending entry (FIFO assumption — only one in-flight request at a time per connection).
+Browse/info/ping requests carry an optional `request_id` that is echoed back on `BrowseResponse`, `InfoResponse`, `Pong`, and request-scoped `Error` replies. `TransferRequest`/`TransferAccepted` already use the transfer UUID as their correlation key.
+
+Pending requests are registered before enqueueing the outbound control message and are removed on success, timeout, or disconnect. Responses are never matched by arrival order.
 
 ## REST API
 

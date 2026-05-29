@@ -47,16 +47,16 @@ export interface TransferProgress {
 }
 
 export type ControlMessage =
-  | { type: "BrowseRequest"; path: string }
-  | { type: "BrowseResponse"; hostname: string; cwd: string; entries: FileEntry[] }
-  | { type: "InfoRequest" }
-  | { type: "InfoResponse"; hostname: string; root_dir: string }
+  | { type: "BrowseRequest"; request_id?: string | null; path: string }
+  | { type: "BrowseResponse"; request_id?: string | null; hostname: string; cwd: string; entries: FileEntry[] }
+  | { type: "InfoRequest"; request_id?: string | null }
+  | { type: "InfoResponse"; request_id?: string | null; hostname: string; root_dir: string }
   | { type: "TransferRequest"; id: string; entries: TransferEntry[]; direction: "Push" | "Pull"; destination_path: string }
   | { type: "TransferProgress"; id: string; path: string; bytes_done: number; bytes_total: number }
   | { type: "TransferComplete"; id: string; total_bytes: number }
   | { type: "TransferFinalized"; id: string }
   | { type: "TransferError"; id: string; error: string }
   | { type: "ConnectionStatus"; has_remote: boolean }
-  | { type: "Ping" }
-  | { type: "Pong" }
-  | { type: "Error"; message: string };
+  | { type: "Ping"; request_id?: string | null }
+  | { type: "Pong"; request_id?: string | null }
+  | { type: "Error"; request_id?: string | null; message: string };

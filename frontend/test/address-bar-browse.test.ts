@@ -12,6 +12,7 @@
 import { describe, it, beforeAll, afterAll, expect } from 'vitest';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
 import { getAvailablePort } from './helpers/ports.js';
 import { DriftProcess } from './helpers/drift-process.js';
 import { WsBrowserClient } from './helpers/ws-client.js';
@@ -138,6 +139,40 @@ describe('address bar browse', () => {
       const subData: BrowseResponse = await subRes.json();
       expect(subData.cwd).toContain(subdir.name);
       expect(Array.isArray(subData.entries)).toBe(true);
+    });
+
+    it('keeps concurrent browse-remote responses matched to the requested path', async () => {
+      const remoteRoot = path.join(TEST_RESOURCES, 'host');
+      const alphaDir = path.join(remoteRoot, 'concurrent-alpha');
+      const betaDir = path.join(remoteRoot, 'concurrent-beta');
+      fs.mkdirSync(alphaDir, { recursive: true });
+      fs.mkdirSync(betaDir, { recursive: true });
+      fs.writeFileSync(path.join(alphaDir, 'alpha-only.txt'), 'alpha\n');
+      fs.writeFileSync(path.join(betaDir, 'beta-only.txt'), 'beta\n');
+
+      const requests = ['.', 'concurrent-alpha', 'concurrent-beta', 'concurrent-alpha', 'concurrent-beta'];
+      const responses = await Promise.all(
+        requests.map(async (reqPath) => {
+          const res = await fetch(`${client.baseUrl}/api/browse-remote?path=${encodeURIComponent(reqPath)}`);
+          expect(res.ok, `browse-remote should succeed for ${reqPath}`).toBe(true);
+          return {
+            reqPath,
+            data: await res.json() as BrowseResponse,
+          };
+        }),
+      );
+
+      for (const { reqPath, data } of responses) {
+        if (reqPath === 'concurrent-alpha') {
+          expect(data.cwd).toContain('concurrent-alpha');
+          expect(data.entries.map((e) => e.name)).toContain('alpha-only.txt');
+          expect(data.entries.map((e) => e.name)).not.toContain('beta-only.txt');
+        } else if (reqPath === 'concurrent-beta') {
+          expect(data.cwd).toContain('concurrent-beta');
+          expect(data.entries.map((e) => e.name)).toContain('beta-only.txt');
+          expect(data.entries.map((e) => e.name)).not.toContain('alpha-only.txt');
+        }
+      }
     });
 
     it('returns 400 when no remote connection exists', async () => {

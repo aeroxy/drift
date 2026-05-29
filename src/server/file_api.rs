@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::fileops::browse;
 use crate::protocol::messages::{ControlMessage, FileEntry};
@@ -54,38 +55,54 @@ pub async fn browse_remote(
     State(state): State<Arc<AppState>>,
     Query(params): Query<BrowseParams>,
 ) -> Result<Json<BrowseResponse>, StatusCode> {
+    let request_id = Uuid::new_v4();
     let response_rx = {
         let remote = state.remote.read().await;
         let remote_conn = remote.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
 
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let msg = ControlMessage::BrowseRequest {
+            request_id: Some(request_id),
             path: params.path.clone(),
         };
         remote_conn
-            .tx
-            .send((msg, response_tx))
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+            .pending_requests
+            .lock()
+            .await
+            .insert(request_id, response_tx);
+        if remote_conn.tx.send(msg).is_err() {
+            remote_conn.pending_requests.lock().await.remove(&request_id);
+            return Err(StatusCode::BAD_REQUEST);
+        }
         response_rx
     }; // lock released here
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
         Ok(Ok(ControlMessage::BrowseResponse {
+            request_id: Some(response_id),
             hostname,
             cwd,
             entries,
-        })) => Ok(Json(BrowseResponse {
+        })) if response_id == request_id => Ok(Json(BrowseResponse {
             hostname,
             cwd,
             entries,
         })),
-        Ok(Ok(ControlMessage::Error { message })) => {
+        Ok(Ok(ControlMessage::Error {
+            request_id: Some(response_id),
+            message,
+        })) if response_id == request_id => {
             tracing::warn!("Remote browse error: {}", message);
-            Err(StatusCode::BAD_REQUEST)
+            Err(StatusCode::BAD_GATEWAY)
         }
         Ok(Ok(_)) => Err(StatusCode::BAD_GATEWAY),
         Ok(Err(_)) => Err(StatusCode::BAD_GATEWAY),
-        Err(_) => Err(StatusCode::GATEWAY_TIMEOUT),
+        Err(_) => {
+            if let Some(remote_conn) = state.remote.read().await.as_ref() {
+                remote_conn.pending_requests.lock().await.remove(&request_id);
+            }
+            Err(StatusCode::GATEWAY_TIMEOUT)
+        }
     }
 }
 

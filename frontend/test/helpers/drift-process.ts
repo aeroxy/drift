@@ -3,7 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../../../');
-const BINARY = path.join(PROJECT_ROOT, 'target/debug/drift');
+const DEFAULT_BINARY = path.join(PROJECT_ROOT, 'target/debug/drift');
+const BINARY = process.env.DRIFT_BINARY ?? DEFAULT_BINARY;
 
 interface DriftProcessOptions {
   port?: number;

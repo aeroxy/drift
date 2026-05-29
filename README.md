@@ -159,6 +159,8 @@ drift prioritizes maximum compatibility and zero configuration:
 | Text (encrypted) | JSON `ControlMessage` | Browse, transfer control, progress |
 | Binary (encrypted) | `[16B UUID][8B offset][chunk]` | File data |
 
+Request/response control messages such as browse and info use correlation IDs so concurrent requests can be matched to the correct reply even if responses arrive out of order or a caller times out.
+
 ### Security
 
 - **Forward secrecy**: ephemeral X25519 keys per session

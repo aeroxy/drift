@@ -33,7 +33,8 @@ pub struct AppState {
 }
 
 pub type ResponseChannel = oneshot::Sender<ControlMessage>;
-pub type RequestChannel = mpsc::UnboundedSender<(ControlMessage, ResponseChannel)>;
+pub type PendingResponses = Arc<Mutex<HashMap<Uuid, ResponseChannel>>>;
+pub type RequestChannel = mpsc::UnboundedSender<ControlMessage>;
 
 /// Unified outgoing channel. Carries pre-encoded frames (type byte + payload, NOT yet
 /// encrypted). Both data chunks (`encode_data_frame`) and control messages
@@ -46,6 +47,8 @@ pub struct RemoteConnection {
     pub root_dir: String,
     /// For browser-initiated requests that need a response (e.g. BrowseRequest).
     pub tx: RequestChannel,
+    /// Pending request/response channels keyed by protocol correlation id.
+    pub pending_requests: PendingResponses,
     /// Unified outbound: send pre-encoded frames via `encode_data_frame` or
     /// `encode_control_frame` from `crate::protocol::codec`.
     pub frame_tx: FrameChannel,
@@ -54,6 +57,21 @@ pub struct RemoteConnection {
     pub task_handles: Vec<tokio::task::AbortHandle>,
     /// Protocol version of the peer (None if unknown/old version).
     pub peer_version: Option<u32>,
+}
+
+pub async fn deliver_pending_response(
+    pending: &PendingResponses,
+    control_msg: ControlMessage,
+) -> bool {
+    let Some(response_id) = control_msg.response_id() else {
+        return false;
+    };
+    let mut pending_lock = pending.lock().await;
+    let Some(response_tx) = pending_lock.remove(&response_id) else {
+        return false;
+    };
+    let _ = response_tx.send(control_msg);
+    true
 }
 
 impl AppState {
@@ -104,6 +122,13 @@ pub async fn disconnect_remote(state: &AppState, clear_creds: bool) {
         remote.take()
     };
     if let Some(conn) = connection {
+        let mut pending = conn.pending_requests.lock().await;
+        for (request_id, tx) in pending.drain() {
+            let _ = tx.send(ControlMessage::Error {
+                request_id: Some(request_id),
+                message: "Remote connection lost".to_string(),
+            });
+        }
         for handle in conn.task_handles {
             handle.abort();
         }
@@ -116,6 +141,126 @@ pub async fn disconnect_remote(state: &AppState, clear_creds: bool) {
     let _ = state
         .browser_events
         .send(ControlMessage::ConnectionStatus { has_remote: false });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use std::path::PathBuf;
+    use tokio::sync::mpsc;
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            target: None,
+            password: None,
+            root_dir: PathBuf::from("."),
+            hostname: "test-host".to_string(),
+            allow_insecure_tls: true,
+            disable_ui: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn delivers_out_of_order_responses_by_request_id() {
+        let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let request_a = Uuid::new_v4();
+        let request_b = Uuid::new_v4();
+        let (tx_a, rx_a) = oneshot::channel();
+        let (tx_b, rx_b) = oneshot::channel();
+        pending.lock().await.insert(request_a, tx_a);
+        pending.lock().await.insert(request_b, tx_b);
+
+        assert!(
+            deliver_pending_response(
+                &pending,
+                ControlMessage::BrowseResponse {
+                    request_id: Some(request_b),
+                    hostname: "remote".to_string(),
+                    cwd: "/b".to_string(),
+                    entries: vec![],
+                },
+            )
+            .await
+        );
+
+        match rx_b.await.expect("request b should resolve") {
+            ControlMessage::BrowseResponse {
+                request_id,
+                cwd,
+                ..
+            } => {
+                assert_eq!(request_id, Some(request_b));
+                assert_eq!(cwd, "/b");
+            }
+            other => panic!("unexpected response for request b: {other:?}"),
+        }
+
+        assert_eq!(pending.lock().await.len(), 1);
+
+        assert!(
+            deliver_pending_response(
+                &pending,
+                ControlMessage::BrowseResponse {
+                    request_id: Some(request_a),
+                    hostname: "remote".to_string(),
+                    cwd: "/a".to_string(),
+                    entries: vec![],
+                },
+            )
+            .await
+        );
+
+        match rx_a.await.expect("request a should resolve") {
+            ControlMessage::BrowseResponse {
+                request_id,
+                cwd,
+                ..
+            } => {
+                assert_eq!(request_id, Some(request_a));
+                assert_eq!(cwd, "/a");
+            }
+            other => panic!("unexpected response for request a: {other:?}"),
+        }
+
+        assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnect_remote_fails_pending_requests() {
+        let state = AppState::new(test_config());
+        let pending_requests: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let request_id = Uuid::new_v4();
+        let (tx, rx) = oneshot::channel();
+        pending_requests.lock().await.insert(request_id, tx);
+        let (request_tx, _request_rx) = mpsc::unbounded_channel::<ControlMessage>();
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        *state.remote.write().await = Some(RemoteConnection {
+            hostname: "remote".to_string(),
+            root_dir: "/".to_string(),
+            tx: request_tx,
+            pending_requests: pending_requests.clone(),
+            frame_tx,
+            task_handles: vec![],
+            peer_version: None,
+        });
+
+        disconnect_remote(&state, false).await;
+
+        match rx.await.expect("pending request should receive disconnect error") {
+            ControlMessage::Error {
+                request_id: Some(id),
+                message,
+            } => {
+                assert_eq!(id, request_id);
+                assert_eq!(message, "Remote connection lost");
+            }
+            other => panic!("unexpected pending request message: {other:?}"),
+        }
+
+        assert!(pending_requests.lock().await.is_empty());
+    }
 }
 
 pub async fn run(state: Arc<AppState>, port: Option<u16>) -> anyhow::Result<()> {

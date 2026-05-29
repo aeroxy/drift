@@ -32,6 +32,7 @@ pub async fn pull_remote(
         &crypto,
         &mut ws_write,
         &ControlMessage::BrowseRequest {
+            request_id: None,
             path: parent.to_string(),
         },
     )
@@ -44,7 +45,7 @@ pub async fn pull_remote(
             .into_iter()
             .find(|e| e.name == file_name)
             .ok_or_else(|| anyhow::anyhow!("'{}' not found on remote", remote_path))?,
-        ControlMessage::Error { message } => {
+        ControlMessage::Error { message, .. } => {
             anyhow::bail!("Browse failed: {}", message);
         }
         other => {
