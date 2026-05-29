@@ -471,15 +471,18 @@ pub async fn connect_to_remote(
         })
         .is_ok()
     {
-        if let Ok(Ok(ControlMessage::InfoResponse {
-            hostname, root_dir, ..
-        })) =
-            tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await
-        {
-            let mut remote = state.remote.write().await;
-            if let Some(ref mut remote_conn) = *remote {
-                remote_conn.hostname = hostname;
-                remote_conn.root_dir = root_dir;
+        match tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await {
+            Ok(Ok(ControlMessage::InfoResponse {
+                hostname, root_dir, ..
+            })) => {
+                let mut remote = state.remote.write().await;
+                if let Some(ref mut remote_conn) = *remote {
+                    remote_conn.hostname = hostname;
+                    remote_conn.root_dir = root_dir;
+                }
+            }
+            _ => {
+                pending.lock().await.remove(&request_id);
             }
         }
     } else {
