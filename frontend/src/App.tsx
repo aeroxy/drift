@@ -7,6 +7,15 @@ import FilePane from "./components/FilePane";
 import Toolbar from "./components/Toolbar";
 import type { SelectModifiers } from "./components/FileRow";
 
+function getRootRelativePath(path: string, root: string): string | null {
+  const rootPrefix = root === "/" ? root : root.endsWith("/") ? root : `${root}/`;
+
+  if (path === root) return ".";
+  if (path.startsWith(rootPrefix)) return path.slice(rootPrefix.length) || ".";
+
+  return null;
+}
+
 export default function App() {
   // Local state
   const [localInfo, setLocalInfo] = useState<{ hostname: string; cwd: string; rootDir: string }>({
@@ -57,10 +66,7 @@ export default function App() {
     setLocalLoading(true);
     try {
       const root = localRootDirRef.current;
-      let relative = path;
-      if (root && path.startsWith(root)) {
-        relative = path.slice(root.length).replace(/^\//, "") || ".";
-      }
+      const relative = root ? getRootRelativePath(path, root) ?? path : path;
       const res = await fetch(`/api/browse?path=${encodeURIComponent(relative)}`);
       if (res.ok) {
         const data: BrowseResponse = await res.json();
@@ -316,9 +322,7 @@ export default function App() {
   const handleLocalNavigateTo = useCallback(
     async (absolutePath: string) => {
       const root = localRootDirRef.current;
-      const relative = root && absolutePath.startsWith(root)
-        ? absolutePath.slice(root.length).replace(/^\//, "") || "."
-        : absolutePath;
+      const relative = root ? getRootRelativePath(absolutePath, root) ?? absolutePath : absolutePath;
       const success = await fetchLocal(relative);
       if (success) {
         setLocalPath(relative);
@@ -351,9 +355,11 @@ export default function App() {
         .map((e) => `${localInfo.cwd}/${e.name}`);
     }
     let relParent: string;
-    if (root && parentDir.startsWith(root)) {
-      relParent = parentDir.slice(root.length).replace(/^\//, "") || ".";
-    } else if (root && inputValue.startsWith(root)) {
+    const relativeParent = root ? getRootRelativePath(parentDir, root) : null;
+    const relativeInput = root ? getRootRelativePath(inputValue, root) : null;
+    if (relativeParent !== null) {
+      relParent = relativeParent;
+    } else if (root && relativeInput !== null) {
       // inputValue is at or below root_dir, but parentDir is outside — browse root_dir
       relParent = ".";
     } else if (root) {
