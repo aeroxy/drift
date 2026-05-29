@@ -54,17 +54,20 @@ pub async fn browse_remote(
     State(state): State<Arc<AppState>>,
     Query(params): Query<BrowseParams>,
 ) -> Result<Json<BrowseResponse>, StatusCode> {
-    let remote = state.remote.read().await;
-    let remote_conn = remote.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
+    let response_rx = {
+        let remote = state.remote.read().await;
+        let remote_conn = remote.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
 
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    let msg = ControlMessage::BrowseRequest {
-        path: params.path.clone(),
-    };
-    remote_conn
-        .tx
-        .send((msg, response_tx))
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let msg = ControlMessage::BrowseRequest {
+            path: params.path.clone(),
+        };
+        remote_conn
+            .tx
+            .send((msg, response_tx))
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        response_rx
+    }; // lock released here
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
         Ok(Ok(ControlMessage::BrowseResponse {

@@ -11,18 +11,17 @@
 import { describe, it, beforeAll, afterAll, expect } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
 import { getAvailablePort } from './helpers/ports.js';
 import { DriftProcess } from './helpers/drift-process.js';
 import { WsBrowserClient } from './helpers/ws-client.js';
+import { isolateTestResources, cleanupIsolatedTestResources } from './helpers/test-resources.js';
 import type { FileEntry } from '../src/types/protocol.js';
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../../');
-const TEST_RESOURCES = path.join(PROJECT_ROOT, 'test-resources');
-const TEST_RESOURCES_BAK = path.join(PROJECT_ROOT, 'test-resources-bak');
+let TEST_RESOURCES = path.join(PROJECT_ROOT, 'test-resources');
 
 interface BrowseResponse {
   hostname: string;
@@ -232,17 +231,7 @@ function registerExitHandler() {
 
 describe('web panel subdirectory transfers', () => {
   beforeAll(async () => {
-    if (!fs.existsSync(TEST_RESOURCES)) {
-      throw new Error(
-        'test-resources/ not found. See test-resources/README.md for setup instructions.',
-      );
-    }
-
-    // Backup
-    if (fs.existsSync(TEST_RESOURCES_BAK)) {
-      fs.rmSync(TEST_RESOURCES_BAK, { recursive: true, force: true });
-    }
-    execSync(`cp -a ${JSON.stringify(TEST_RESOURCES)} ${JSON.stringify(TEST_RESOURCES_BAK)}`);
+    TEST_RESOURCES = isolateTestResources();
 
     const hostPort = await getAvailablePort();
     const clientPort = await getAvailablePort();
@@ -262,14 +251,7 @@ describe('web panel subdirectory transfers', () => {
 
   afterAll(async () => {
     await Promise.all([host?.stop(), client?.stop()]);
-    try {
-      fs.rmSync(TEST_RESOURCES, { recursive: true, force: true });
-      if (fs.existsSync(TEST_RESOURCES_BAK)) {
-        fs.renameSync(TEST_RESOURCES_BAK, TEST_RESOURCES);
-      }
-    } catch (err) {
-      console.error('Failed to restore test-resources:', err);
-    }
+    cleanupIsolatedTestResources(TEST_RESOURCES);
   }, 30_000);
 
   // -------------------------------------------------------------------------

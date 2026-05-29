@@ -8,9 +8,10 @@ interface PathBarProps {
   onRefresh: () => void;
   onNavigateTo: (absolutePath: string) => void;
   fetchSuggestions?: (input: string) => Promise<string[]>;
+  onTabComplete?: (input: string) => void;
 }
 
-export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions }: PathBarProps) {
+export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigateTo, fetchSuggestions, onTabComplete }: PathBarProps) {
   const [inputValue, setInputValue] = useState(cwd);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -66,12 +67,17 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIndex((i) => Math.max(i - 1, -1));
-    } else if (e.key === "Tab" && suggestions.length > 0) {
-      e.preventDefault();
-      const selected = activeIndex >= 0 ? suggestions[activeIndex] : suggestions[0];
-      setInputValue(selected + "/");
-      setSuggestions([]);
-      setActiveIndex(-1);
+    } else if (e.key === "Tab") {
+      if (suggestions.length > 0) {
+        e.preventDefault();
+        const selected = activeIndex >= 0 ? suggestions[activeIndex] : suggestions[0];
+        setInputValue(selected + "/");
+        setSuggestions([]);
+        setActiveIndex(-1);
+      } else if (onTabComplete) {
+        e.preventDefault();
+        onTabComplete(inputValue);
+      }
     }
   };
 

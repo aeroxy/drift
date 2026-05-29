@@ -1,16 +1,15 @@
 import { describe, it, beforeAll, afterAll, expect } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
 import { getAvailablePort } from './helpers/ports.js';
 import { DriftProcess, runDriftCli } from './helpers/drift-process.js';
 import { WsBrowserClient } from './helpers/ws-client.js';
 import { computeAllChecksums } from './helpers/checksums.js';
+import { isolateTestResources, cleanupIsolatedTestResources } from './helpers/test-resources.js';
 import type { FileEntry } from '../src/types/protocol.js';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../../');
-const TEST_RESOURCES = path.join(PROJECT_ROOT, 'test-resources');
-const TEST_RESOURCES_BAK = path.join(PROJECT_ROOT, 'test-resources-bak');
+let TEST_RESOURCES = path.join(PROJECT_ROOT, 'test-resources');
 
 interface BrowseResponse {
   hostname: string;
@@ -133,19 +132,7 @@ function registerExitHandler() {
 
 describe('drift integration', () => {
   beforeAll(async () => {
-    // Verify test-resources exists
-    if (!fs.existsSync(TEST_RESOURCES)) {
-      throw new Error(
-        'test-resources/ not found. Create test-resources/host/ (with a subdirectory) ' +
-        'and test-resources/client/ (with files) before running tests.'
-      );
-    }
-
-    // Backup test-resources before anything touches it
-    if (fs.existsSync(TEST_RESOURCES_BAK)) {
-      fs.rmSync(TEST_RESOURCES_BAK, { recursive: true, force: true });
-    }
-    execSync(`cp -a ${JSON.stringify(TEST_RESOURCES)} ${JSON.stringify(TEST_RESOURCES_BAK)}`);
+    TEST_RESOURCES = isolateTestResources();
 
     // Snapshot initial checksums BEFORE any transfers
     hostChecksums = await computeAllChecksums(path.join(TEST_RESOURCES, 'host'));
@@ -185,16 +172,7 @@ describe('drift integration', () => {
 
   afterAll(async () => {
     await Promise.all([host?.stop(), client?.stop()]);
-
-    // Restore test-resources
-    try {
-      fs.rmSync(TEST_RESOURCES, { recursive: true, force: true });
-      if (fs.existsSync(TEST_RESOURCES_BAK)) {
-        fs.renameSync(TEST_RESOURCES_BAK, TEST_RESOURCES);
-      }
-    } catch (err) {
-      console.error('Failed to restore test-resources:', err);
-    }
+    cleanupIsolatedTestResources(TEST_RESOURCES);
   }, 30_000);
 
   // Pull tests run first to avoid the frame channel being saturated by push data.
