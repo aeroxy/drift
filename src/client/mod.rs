@@ -258,11 +258,9 @@ pub async fn connect_to_remote(
     let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     // Separate request channel for forwarded browser API requests
-    let (request_tx, mut request_rx) =
-        mpsc::unbounded_channel::<(ControlMessage, ResponseChannel)>();
+    let (request_tx, mut request_rx) = mpsc::unbounded_channel::<ControlMessage>();
 
     let pending = Arc::new(Mutex::new(HashMap::<Uuid, ResponseChannel>::new()));
-    let pending_request = pending.clone();
     let pending_read = pending.clone();
     let crypto_write = crypto.clone();
     let crypto_read = crypto.clone();
@@ -272,9 +270,7 @@ pub async fn connect_to_remote(
     // Request handler: tracks pending responses
     let frame_tx_request = frame_tx.clone();
     let request_handle = tokio::spawn(async move {
-        while let Some((msg, response_tx)) = request_rx.recv().await {
-            let id = Uuid::new_v4();
-            pending_request.lock().await.insert(id, response_tx);
+        while let Some(msg) = request_rx.recv().await {
             let json = serde_json::to_string(&msg).unwrap();
             let _ = frame_tx_request.send(encode_control_frame(json.as_bytes()));
         }
@@ -424,12 +420,11 @@ pub async fn connect_to_remote(
                                         frame_tx_read.send(encode_control_frame(json.as_bytes()));
                                 }
                             } else {
-                                let mut pending_lock = pending_read.lock().await;
-                                if let Some(id) = pending_lock.keys().next().copied() {
-                                    if let Some(response_tx) = pending_lock.remove(&id) {
-                                        let _ = response_tx.send(control_msg);
-                                    }
-                                }
+                                let _ = crate::server::deliver_pending_response(
+                                    &pending_read,
+                                    control_msg,
+                                )
+                                .await;
                             }
                         }
                         other => {
@@ -452,6 +447,7 @@ pub async fn connect_to_remote(
             hostname: target.to_string(),
             root_dir: "/".to_string(),
             tx: request_tx.clone(),
+            pending_requests: pending.clone(),
             frame_tx: frame_tx.clone(),
             task_handles: vec![
                 request_handle.abort_handle(),
@@ -466,12 +462,18 @@ pub async fn connect_to_remote(
         .send(ControlMessage::ConnectionStatus { has_remote: true });
 
     // Send InfoRequest to get remote hostname and root_dir
+    let request_id = Uuid::new_v4();
     let (info_tx, info_rx) = tokio::sync::oneshot::channel();
+    pending.lock().await.insert(request_id, info_tx);
     if request_tx
-        .send((ControlMessage::InfoRequest, info_tx))
+        .send(ControlMessage::InfoRequest {
+            request_id: Some(request_id),
+        })
         .is_ok()
     {
-        if let Ok(Ok(ControlMessage::InfoResponse { hostname, root_dir })) =
+        if let Ok(Ok(ControlMessage::InfoResponse {
+            hostname, root_dir, ..
+        })) =
             tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await
         {
             let mut remote = state.remote.write().await;
@@ -480,6 +482,8 @@ pub async fn connect_to_remote(
                 remote_conn.root_dir = root_dir;
             }
         }
+    } else {
+        pending.lock().await.remove(&request_id);
     }
 
     tokio::select! {
@@ -503,7 +507,7 @@ async fn handle_incoming_request(
     msg: ControlMessage,
 ) -> Option<ControlMessage> {
     match msg {
-        ControlMessage::BrowseRequest { path } => {
+        ControlMessage::BrowseRequest { request_id, path } => {
             match crate::fileops::browse::list_directory(&state.config.root_dir, &path) {
                 Ok(entries) => {
                     let cwd = state
@@ -515,17 +519,20 @@ async fn handle_incoming_request(
                         .to_string_lossy()
                         .to_string();
                     Some(ControlMessage::BrowseResponse {
+                        request_id,
                         hostname: state.config.hostname.clone(),
                         cwd,
                         entries,
                     })
                 }
                 Err(e) => Some(ControlMessage::Error {
+                    request_id,
                     message: e.to_string(),
                 }),
             }
         }
-        ControlMessage::InfoRequest => Some(ControlMessage::InfoResponse {
+        ControlMessage::InfoRequest { request_id } => Some(ControlMessage::InfoResponse {
+            request_id,
             hostname: state.config.hostname.clone(),
             root_dir: state.config.root_dir.to_string_lossy().to_string(),
         }),
@@ -596,7 +603,7 @@ async fn handle_incoming_request(
                 }
             }
         }
-        ControlMessage::Ping => Some(ControlMessage::Pong),
+        ControlMessage::Ping { request_id } => Some(ControlMessage::Pong { request_id }),
         _ => None,
     }
 }
@@ -669,7 +676,7 @@ pub async fn perform_client_handshake(
                             let msg2: ControlMessage = serde_json::from_str(&text2)?;
                             match msg2 {
                                 ControlMessage::HandshakeComplete => {}
-                                ControlMessage::Error { message } => {
+                                ControlMessage::Error { message, .. } => {
                                     anyhow::bail!("Authentication failed: {}", message);
                                 }
                                 _ => anyhow::bail!("Expected HandshakeComplete after auth"),
@@ -685,7 +692,7 @@ pub async fn perform_client_handshake(
                         );
                     }
                 }
-                ControlMessage::Error { message } => {
+                ControlMessage::Error { message, .. } => {
                     anyhow::bail!("Handshake error: {}", message);
                 }
                 _ => anyhow::bail!("Expected AuthChallenge or HandshakeComplete"),

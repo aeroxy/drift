@@ -172,19 +172,21 @@ pub(crate) async fn recv_control_with_replies(
     for _ in 0..100 {
         let msg = recv_encrypted_control(crypto, ws_read).await?;
         match &msg {
-            ControlMessage::InfoRequest => {
+            ControlMessage::InfoRequest { request_id } => {
                 send_encrypted_control(
                     crypto,
                     ws_write,
                     &ControlMessage::InfoResponse {
+                        request_id: *request_id,
                         hostname: String::new(),
                         root_dir: String::new(),
                     },
                 )
                 .await?;
             }
-            ControlMessage::Ping => {
-                send_encrypted_control(crypto, ws_write, &ControlMessage::Pong).await?;
+            ControlMessage::Ping { request_id } => {
+                send_encrypted_control(crypto, ws_write, &ControlMessage::Pong { request_id: *request_id })
+                    .await?;
             }
             _ => return Ok(msg),
         }

@@ -6,6 +6,7 @@ import ConnectionModal from "./components/ConnectionModal";
 import FilePane from "./components/FilePane";
 import Toolbar from "./components/Toolbar";
 import type { SelectModifiers } from "./components/FileRow";
+import { parseAutocompletePath, shouldUseCachedSuggestions } from "./utils/pathAutocomplete";
 
 function getRootRelativePath(path: string, root: string): string | null {
   const rootPrefix = root === "/" ? root : root.endsWith("/") ? root : `${root}/`;
@@ -344,12 +345,10 @@ export default function App() {
   );
 
   const fetchLocalSuggestions = useCallback(async (inputValue: string): Promise<string[]> => {
-    const lastSlash = inputValue.lastIndexOf("/");
-    const parentDir = lastSlash > 0 ? inputValue.slice(0, lastSlash) : "/";
-    const prefix = inputValue.slice(lastSlash + 1).toLowerCase();
+    const { parentDir, prefix } = parseAutocompletePath(inputValue);
     const root = localRootDirRef.current;
     // Use cached entries when browsing the current local cwd
-    if (parentDir === localInfo.cwd || inputValue === localInfo.cwd) {
+    if (shouldUseCachedSuggestions(inputValue, localInfo.cwd)) {
       return localEntries
         .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
         .map((e) => `${localInfo.cwd}/${e.name}`);
@@ -382,11 +381,9 @@ export default function App() {
   // Remote suggestions — fetch from remote server via REST (no WS side effects)
   const fetchRemoteSuggestions = useCallback(async (inputValue: string): Promise<string[]> => {
     if (!connected || !hasRemote) return [];
-    const lastSlash = inputValue.lastIndexOf("/");
-    const parentDir = lastSlash > 0 ? inputValue.slice(0, lastSlash) : "/";
-    const prefix = inputValue.slice(lastSlash + 1).toLowerCase();
+    const { parentDir, prefix } = parseAutocompletePath(inputValue);
     // Use cached entries when browsing the current remote cwd
-    if (parentDir === remoteInfo.cwd || inputValue === remoteInfo.cwd) {
+    if (shouldUseCachedSuggestions(inputValue, remoteInfo.cwd)) {
       return remoteEntries
         .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
         .map((e) => `${remoteInfo.cwd}/${e.name}`);

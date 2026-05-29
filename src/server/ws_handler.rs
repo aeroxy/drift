@@ -109,6 +109,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                 let _ = sender
                                     .send(Message::Text(
                                         serde_json::to_string(&ControlMessage::Error {
+                                            request_id: None,
                                             message: "authentication failed".into(),
                                         })
                                         .unwrap()
@@ -126,6 +127,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                         let _ = sender
                             .send(Message::Text(
                                 serde_json::to_string(&ControlMessage::Error {
+                                    request_id: None,
                                     message: "authentication failed".into(),
                                 })
                                 .unwrap()
@@ -146,6 +148,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 let _ = sender
                     .send(Message::Text(
                         serde_json::to_string(&ControlMessage::Error {
+                            request_id: None,
                             message: "authentication failed".into(),
                         })
                         .unwrap()
@@ -183,11 +186,9 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
         // Separate request channel for browser-forwarded requests needing responses
-        let (request_tx, mut request_rx) =
-            mpsc::unbounded_channel::<(ControlMessage, ResponseChannel)>();
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<ControlMessage>();
 
         let pending = Arc::new(Mutex::new(HashMap::<Uuid, ResponseChannel>::new()));
-        let pending_request = pending.clone();
         let pending_read = pending.clone();
 
         let crypto_write = crypto.clone();
@@ -198,9 +199,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         // Request handler: routes browser API requests to remote, tracks pending responses
         let frame_tx_request = frame_tx.clone();
         let request_handle = tokio::spawn(async move {
-            while let Some((msg, response_tx)) = request_rx.recv().await {
-                let id = Uuid::new_v4();
-                pending_request.lock().await.insert(id, response_tx);
+            while let Some(msg) = request_rx.recv().await {
                 let json = serde_json::to_string(&msg).unwrap();
                 let _ = frame_tx_request.send(encode_control_frame(json.as_bytes()));
             }
@@ -361,12 +360,11 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     }
                                 } else {
                                     // Response to one of our outgoing requests
-                                    let mut pending_lock = pending_read.lock().await;
-                                    if let Some(id) = pending_lock.keys().next().copied() {
-                                        if let Some(response_tx) = pending_lock.remove(&id) {
-                                            let _ = response_tx.send(control_msg);
-                                        }
-                                    }
+                                    let _ = crate::server::deliver_pending_response(
+                                        &pending_read,
+                                        control_msg,
+                                    )
+                                    .await;
                                 }
                             }
                             other => {
@@ -403,6 +401,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 hostname: "remote".to_string(),
                 root_dir: "/".to_string(),
                 tx: request_tx.clone(),
+                pending_requests: pending.clone(),
                 frame_tx: frame_tx.clone(),
                 task_handles: vec![
                     request_handle.abort_handle(),
@@ -418,14 +417,20 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             .send(ControlMessage::ConnectionStatus { has_remote: true });
 
         // Send InfoRequest to get client's hostname and root_dir
+        let request_id = Uuid::new_v4();
         let (info_tx, info_rx) = tokio::sync::oneshot::channel();
+        pending.lock().await.insert(request_id, info_tx);
         if request_tx
-            .send((ControlMessage::InfoRequest, info_tx))
+            .send(ControlMessage::InfoRequest {
+                request_id: Some(request_id),
+            })
             .is_ok()
         {
             let state_clone = state.clone();
             tokio::spawn(async move {
-                if let Ok(Ok(ControlMessage::InfoResponse { hostname, root_dir })) =
+                if let Ok(Ok(ControlMessage::InfoResponse {
+                    hostname, root_dir, ..
+                })) =
                     tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await
                 {
                     let mut remote = state_clone.remote.write().await;
@@ -435,6 +440,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     }
                 }
             });
+        } else {
+            pending.lock().await.remove(&request_id);
         }
 
         tokio::select! {
@@ -590,7 +597,7 @@ async fn handle_server_to_server_request(
     msg: ControlMessage,
 ) -> Option<ControlMessage> {
     match msg {
-        ControlMessage::BrowseRequest { path } => {
+        ControlMessage::BrowseRequest { request_id, path } => {
             match crate::fileops::browse::list_directory(&state.config.root_dir, &path) {
                 Ok(entries) => {
                     let cwd = state
@@ -602,17 +609,20 @@ async fn handle_server_to_server_request(
                         .to_string_lossy()
                         .to_string();
                     Some(ControlMessage::BrowseResponse {
+                        request_id,
                         hostname: state.config.hostname.clone(),
                         cwd,
                         entries,
                     })
                 }
                 Err(e) => Some(ControlMessage::Error {
+                    request_id,
                     message: e.to_string(),
                 }),
             }
         }
-        ControlMessage::InfoRequest => Some(ControlMessage::InfoResponse {
+        ControlMessage::InfoRequest { request_id } => Some(ControlMessage::InfoResponse {
+            request_id,
             hostname: state.config.hostname.clone(),
             root_dir: state.config.root_dir.to_string_lossy().to_string(),
         }),
@@ -687,7 +697,7 @@ async fn handle_server_to_server_request(
                 }
             }
         }
-        ControlMessage::Ping => Some(ControlMessage::Pong),
+        ControlMessage::Ping { request_id } => Some(ControlMessage::Pong { request_id }),
         _ => None,
     }
 }
@@ -696,27 +706,48 @@ async fn handle_server_to_server_request(
 /// BrowseRequest is NOT handled locally when there is no remote — it returns an error
 /// to prevent the remote panel from mirroring local files.
 async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option<ControlMessage> {
-    if !matches!(msg, ControlMessage::InfoRequest) {
+    if !matches!(msg, ControlMessage::InfoRequest { .. }) {
         let remote = state.remote.read().await;
         if let Some(ref remote_conn) = *remote {
+            let request_tx = remote_conn.tx.clone();
+            let pending_requests = remote_conn.pending_requests.clone();
+            drop(remote);
+            let msg = if msg.is_request() && msg.request_id().is_none() {
+                msg.with_request_id(Uuid::new_v4())
+            } else {
+                msg
+            };
+            let request_id = msg.request_id();
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            if remote_conn.tx.send((msg.clone(), response_tx)).is_ok() {
+            if let Some(request_id) = request_id {
+                pending_requests.lock().await.insert(request_id, response_tx);
+            }
+            if request_tx.send(msg.clone()).is_ok() {
                 match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
                     Ok(Ok(response)) => return Some(response),
                     Ok(Err(_)) => {
                         return Some(ControlMessage::Error {
+                            request_id: None,
                             message: "Remote connection lost".to_string(),
                         });
                     }
                     Err(_) => {
+                        if let Some(request_id) = request_id {
+                            pending_requests.lock().await.remove(&request_id);
+                        }
                         return Some(ControlMessage::Error {
+                            request_id: None,
                             message: "Remote timeout".to_string(),
                         });
                     }
                 }
             }
+            if let Some(request_id) = request_id {
+                pending_requests.lock().await.remove(&request_id);
+            }
             // tx.send failed: channel closed
             return Some(ControlMessage::Error {
+                request_id: None,
                 message: "Remote connection lost".to_string(),
             });
         }
@@ -724,13 +755,14 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
         // No remote — BrowseRequest must not fall through to local handling
         if matches!(msg, ControlMessage::BrowseRequest { .. }) {
             return Some(ControlMessage::Error {
+                request_id: None,
                 message: "No remote connection".to_string(),
             });
         }
     }
 
     match msg {
-        ControlMessage::BrowseRequest { path } => {
+        ControlMessage::BrowseRequest { request_id, path } => {
             match crate::fileops::browse::list_directory(&state.config.root_dir, &path) {
                 Ok(entries) => {
                     let cwd = state
@@ -742,21 +774,24 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
                         .to_string_lossy()
                         .to_string();
                     Some(ControlMessage::BrowseResponse {
+                        request_id,
                         hostname: state.config.hostname.clone(),
                         cwd,
                         entries,
                     })
                 }
                 Err(e) => Some(ControlMessage::Error {
+                    request_id,
                     message: e.to_string(),
                 }),
             }
         }
-        ControlMessage::InfoRequest => Some(ControlMessage::InfoResponse {
+        ControlMessage::InfoRequest { request_id } => Some(ControlMessage::InfoResponse {
+            request_id,
             hostname: state.config.hostname.clone(),
             root_dir: state.config.root_dir.to_string_lossy().to_string(),
         }),
-        ControlMessage::Ping => Some(ControlMessage::Pong),
+        ControlMessage::Ping { request_id } => Some(ControlMessage::Pong { request_id }),
         _ => None,
     }
 }

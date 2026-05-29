@@ -90,7 +90,13 @@ pub async fn handle_browser_transfer(
     };
 
     if let Some(ref remote_conn) = *remote {
-        if remote_conn.tx.send((request_msg, response_tx)).is_err() {
+        remote_conn
+            .pending_requests
+            .lock()
+            .await
+            .insert(id, response_tx);
+        if remote_conn.tx.send(request_msg).is_err() {
+            remote_conn.pending_requests.lock().await.remove(&id);
             send_error(&ws_tx, id, "Failed to send to remote");
             return;
         }
@@ -148,7 +154,12 @@ pub async fn handle_browser_transfer(
         Ok(Ok(ControlMessage::TransferError { error, .. })) => send_error(&ws_tx, id, &error),
         Ok(Ok(_)) => send_error(&ws_tx, id, "Unexpected response from remote"),
         Ok(Err(_)) => send_error(&ws_tx, id, "Remote response channel closed"),
-        Err(_) => send_error(&ws_tx, id, "Remote response timeout"),
+        Err(_) => {
+            if let Some(remote_conn) = state.remote.read().await.as_ref() {
+                remote_conn.pending_requests.lock().await.remove(&id);
+            }
+            send_error(&ws_tx, id, "Remote response timeout");
+        }
     }
 }
 
