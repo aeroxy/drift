@@ -20,6 +20,7 @@ interface FilePaneProps {
   transfers: Transfer[];
   loading?: boolean;
   fetchSuggestions?: (input: string) => Promise<string[]>;
+  onTabComplete?: (input: string) => void;
 }
 
 export default function FilePane({
@@ -35,6 +36,7 @@ export default function FilePane({
   transfers,
   loading,
   fetchSuggestions,
+  onTabComplete,
 }: FilePaneProps) {
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -77,7 +79,7 @@ export default function FilePane({
 
   return (
     <div className="flex flex-col h-full bg-zinc-900/30 border border-zinc-800 rounded-lg overflow-hidden">
-      <PathBar hostname={hostname} cwd={cwd} connected={connected} onRefresh={onRefresh} onNavigateTo={onNavigateTo} fetchSuggestions={fetchSuggestions} />
+      <PathBar hostname={hostname} cwd={cwd} connected={connected} onRefresh={onRefresh} onNavigateTo={onNavigateTo} fetchSuggestions={fetchSuggestions} onTabComplete={onTabComplete} />
       {loading ? (
         <div className="flex-1 flex items-center justify-center">
           <div className="w-5 h-5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />

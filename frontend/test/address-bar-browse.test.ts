@@ -11,15 +11,15 @@
  */
 import { describe, it, beforeAll, afterAll, expect } from 'vitest';
 import * as path from 'path';
-import * as fs from 'fs';
+import * as os from 'os';
 import { getAvailablePort } from './helpers/ports.js';
 import { DriftProcess } from './helpers/drift-process.js';
 import { WsBrowserClient } from './helpers/ws-client.js';
+import { isolateTestResources, cleanupIsolatedTestResources } from './helpers/test-resources.js';
 import type { FileEntry } from '../src/types/protocol.js';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../../');
-const TEST_RESOURCES = path.join(PROJECT_ROOT, 'test-resources');
-const TEST_RESOURCES_BAK = path.join(PROJECT_ROOT, 'test-resources-bak');
+let TEST_RESOURCES = path.join(PROJECT_ROOT, 'test-resources');
 
 interface BrowseResponse {
   hostname: string;
@@ -55,17 +55,7 @@ describe('address bar browse', () => {
   let clientWs: WsBrowserClient;
 
   beforeAll(async () => {
-    if (!fs.existsSync(TEST_RESOURCES)) {
-      throw new Error(
-        'test-resources/ not found. Create test-resources/host/ (with a subdirectory) ' +
-        'and test-resources/client/ (with files) before running tests.'
-      );
-    }
-
-    if (fs.existsSync(TEST_RESOURCES_BAK)) {
-      fs.rmSync(TEST_RESOURCES_BAK, { recursive: true, force: true });
-    }
-    fs.cpSync(TEST_RESOURCES, TEST_RESOURCES_BAK, { recursive: true });
+    TEST_RESOURCES = isolateTestResources();
 
     const hostPort = await getAvailablePort();
     const clientPort = await getAvailablePort();
@@ -93,15 +83,7 @@ describe('address bar browse', () => {
     hostWs?.close();
     clientWs?.close();
     await Promise.all([host?.stop(), client?.stop()]);
-
-    try {
-      fs.rmSync(TEST_RESOURCES, { recursive: true, force: true });
-      if (fs.existsSync(TEST_RESOURCES_BAK)) {
-        fs.renameSync(TEST_RESOURCES_BAK, TEST_RESOURCES);
-      }
-    } catch (err) {
-      console.error('Failed to restore test-resources:', err);
-    }
+    cleanupIsolatedTestResources(TEST_RESOURCES);
   }, 30_000);
 
   // -------------------------------------------------------------------------
@@ -177,16 +159,17 @@ describe('address bar browse', () => {
     });
 
     it('does not update the remote panel state (silent)', async () => {
-      // Capture current remote state via /api/info
-      const infoBefore = await (await fetch(`${client.baseUrl}/api/info`)).json();
+      // Capture remote cwd via /api/browse-remote
+      const beforeRes = await fetch(`${client.baseUrl}/api/browse-remote?path=.`);
+      const beforeData: BrowseResponse = await beforeRes.json();
+      const cwdBefore = beforeData.cwd;
 
-      // Browse a remote subdirectory via REST
+      // Browse again via REST — should not change the remote panel's cwd
       const browseRes = await fetch(`${client.baseUrl}/api/browse-remote?path=.`);
       expect(browseRes.ok).toBe(true);
+      const afterData: BrowseResponse = await browseRes.json();
 
-      // Remote state should be unchanged — /api/info still shows same connection
-      const infoAfter = await (await fetch(`${client.baseUrl}/api/info`)).json();
-      expect(infoAfter.has_remote).toBe(infoBefore.has_remote);
+      expect(afterData.cwd).toBe(cwdBefore);
     });
   });
 
@@ -217,8 +200,9 @@ describe('address bar browse', () => {
     });
 
     it('rejects paths outside root_dir with 400', async () => {
+      const outsidePath = path.join(os.tmpdir(), 'drift-test-outside');
       const res = await fetch(
-        `${host.baseUrl}/api/browse?path=${encodeURIComponent('/tmp')}`,
+        `${host.baseUrl}/api/browse?path=${encodeURIComponent(outsidePath)}`,
       );
       expect(res.ok).toBe(false);
       expect(res.status).toBe(400);

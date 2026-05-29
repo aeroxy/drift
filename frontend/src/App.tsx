@@ -59,7 +59,7 @@ export default function App() {
       const root = localRootDirRef.current;
       let relative = path;
       if (root && path.startsWith(root)) {
-        relative = path.slice(root.length).replace(/^\//, "");
+        relative = path.slice(root.length).replace(/^\//, "") || ".";
       }
       const res = await fetch(`/api/browse?path=${encodeURIComponent(relative)}`);
       if (res.ok) {
@@ -317,7 +317,7 @@ export default function App() {
     async (absolutePath: string) => {
       const root = localRootDirRef.current;
       const relative = root && absolutePath.startsWith(root)
-        ? absolutePath.slice(root.length).replace(/^\//, "")
+        ? absolutePath.slice(root.length).replace(/^\//, "") || "."
         : absolutePath;
       const success = await fetchLocal(relative);
       if (success) {
@@ -545,6 +545,7 @@ export default function App() {
           fetchSuggestions={fetchLocalSuggestions}
           transfers={activeTransfers.filter(() => true)}
           loading={localLoading}
+          onTabComplete={handleLocalNavigateTo}
         />
         <FilePane
           label="remote"
@@ -560,6 +561,7 @@ export default function App() {
           transfers={[]}
           loading={false}
           fetchSuggestions={fetchRemoteSuggestions}
+          onTabComplete={handleRemoteNavigateTo}
         />
       </div>
     </div>
