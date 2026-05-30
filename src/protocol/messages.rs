@@ -5,8 +5,10 @@ use uuid::Uuid;
 /// Current protocol version. Increment when making backward-incompatible changes.
 /// Version 1: Original format (no file_index in frames)
 /// Version 2: Added file_index to data frames for multi-file transfers
-pub const CURRENT_PROTOCOL_VERSION: u32 = 2;
+/// Version 3: Correlated request/response ids for browse/info/ping
+pub const CURRENT_PROTOCOL_VERSION: u32 = 3;
 pub const MIN_MULTI_FILE_VERSION: u32 = 2;
+pub const MIN_REQUEST_ID_VERSION: u32 = 3;
 
 fn default_destination() -> String {
     ".".to_string()

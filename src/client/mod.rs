@@ -162,8 +162,9 @@ use crate::protocol::codec::{
     encode_control_frame,
 };
 use crate::protocol::messages::{CURRENT_PROTOCOL_VERSION, ControlMessage};
-use crate::server::{AppState, RemoteConnection, ResponseChannel};
+use crate::server::{AppState, PendingResponseOrder, RemoteConnection, ResponseChannel};
 use futures_util::{SinkExt, StreamExt};
+use std::collections::VecDeque;
 use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -233,6 +234,7 @@ pub async fn connect_to_remote(
     allow_insecure_tls: bool,
     state: Arc<AppState>,
 ) -> anyhow::Result<()> {
+    let connection_id = Uuid::new_v4();
     let (ws_stream, _) = open_ws(target, allow_insecure_tls).await?;
     tracing::info!("Connected to remote: {}", target);
 
@@ -261,7 +263,9 @@ pub async fn connect_to_remote(
     let (request_tx, mut request_rx) = mpsc::unbounded_channel::<ControlMessage>();
 
     let pending = Arc::new(Mutex::new(HashMap::<Uuid, ResponseChannel>::new()));
+    let pending_order: PendingResponseOrder = Arc::new(Mutex::new(VecDeque::new()));
     let pending_read = pending.clone();
+    let pending_order_read = pending_order.clone();
     let crypto_write = crypto.clone();
     let crypto_read = crypto.clone();
     let state_read = state.clone();
@@ -422,7 +426,9 @@ pub async fn connect_to_remote(
                             } else {
                                 let _ = crate::server::deliver_pending_response(
                                     &pending_read,
+                                    &pending_order_read,
                                     control_msg,
+                                    peer_version,
                                 )
                                 .await;
                             }
@@ -444,10 +450,12 @@ pub async fn connect_to_remote(
     {
         let mut remote = state.remote.write().await;
         *remote = Some(RemoteConnection {
+            instance_id: connection_id,
             hostname: target.to_string(),
             root_dir: "/".to_string(),
             tx: request_tx.clone(),
             pending_requests: pending.clone(),
+            pending_request_order: pending_order.clone(),
             frame_tx: frame_tx.clone(),
             task_handles: vec![
                 request_handle.abort_handle(),
@@ -464,7 +472,14 @@ pub async fn connect_to_remote(
     // Send InfoRequest to get remote hostname and root_dir
     let request_id = Uuid::new_v4();
     let (info_tx, info_rx) = tokio::sync::oneshot::channel();
-    pending.lock().await.insert(request_id, info_tx);
+    crate::server::register_pending_response(
+        &pending,
+        &pending_order,
+        request_id,
+        info_tx,
+        peer_version,
+    )
+    .await;
     if request_tx
         .send(ControlMessage::InfoRequest {
             request_id: Some(request_id),
@@ -477,16 +492,20 @@ pub async fn connect_to_remote(
             })) => {
                 let mut remote = state.remote.write().await;
                 if let Some(ref mut remote_conn) = *remote {
-                    remote_conn.hostname = hostname;
-                    remote_conn.root_dir = root_dir;
+                    if remote_conn.instance_id == connection_id {
+                        remote_conn.hostname = hostname;
+                        remote_conn.root_dir = root_dir;
+                    }
                 }
             }
             _ => {
-                pending.lock().await.remove(&request_id);
+                let _ =
+                    crate::server::remove_pending_response(&pending, &pending_order, request_id)
+                        .await;
             }
         }
     } else {
-        pending.lock().await.remove(&request_id);
+        let _ = crate::server::remove_pending_response(&pending, &pending_order, request_id).await;
     }
 
     tokio::select! {
@@ -494,13 +513,11 @@ pub async fn connect_to_remote(
         _ = read_handle => {},
     }
 
-    {
-        let mut remote = state.remote.write().await;
-        *remote = None;
+    if crate::server::clear_remote_if_instance(&state, connection_id).await {
+        let _ = state
+            .browser_events
+            .send(ControlMessage::ConnectionStatus { has_remote: false });
     }
-    let _ = state
-        .browser_events
-        .send(ControlMessage::ConnectionStatus { has_remote: false });
 
     Ok(())
 }

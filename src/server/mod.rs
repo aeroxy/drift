@@ -6,9 +6,9 @@ pub mod ws_handler;
 
 use crate::config::AppConfig;
 use crate::frontend::static_handler;
-use crate::protocol::messages::ControlMessage;
+use crate::protocol::messages::{ControlMessage, MIN_REQUEST_ID_VERSION};
 use axum::{Router, routing::get};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
 use tower_http::cors::CorsLayer;
@@ -34,6 +34,7 @@ pub struct AppState {
 
 pub type ResponseChannel = oneshot::Sender<ControlMessage>;
 pub type PendingResponses = Arc<Mutex<HashMap<Uuid, ResponseChannel>>>;
+pub type PendingResponseOrder = Arc<Mutex<VecDeque<Uuid>>>;
 pub type RequestChannel = mpsc::UnboundedSender<ControlMessage>;
 
 /// Unified outgoing channel. Carries pre-encoded frames (type byte + payload, NOT yet
@@ -43,12 +44,17 @@ pub type RequestChannel = mpsc::UnboundedSender<ControlMessage>;
 pub type FrameChannel = mpsc::UnboundedSender<Vec<u8>>;
 
 pub struct RemoteConnection {
+    /// Unique instance id for this live connection. Used to prevent stale tasks
+    /// from clearing or restoring over a newer remote connection.
+    pub instance_id: Uuid,
     pub hostname: String,
     pub root_dir: String,
     /// For browser-initiated requests that need a response (e.g. BrowseRequest).
     pub tx: RequestChannel,
     /// Pending request/response channels keyed by protocol correlation id.
     pub pending_requests: PendingResponses,
+    /// FIFO registration order for peers that do not echo correlation ids.
+    pub pending_request_order: PendingResponseOrder,
     /// Unified outbound: send pre-encoded frames via `encode_data_frame` or
     /// `encode_control_frame` from `crate::protocol::codec`.
     pub frame_tx: FrameChannel,
@@ -59,19 +65,99 @@ pub struct RemoteConnection {
     pub peer_version: Option<u32>,
 }
 
+pub async fn abort_remote_connection(conn: RemoteConnection) {
+    let mut pending = conn.pending_requests.lock().await;
+    for (request_id, tx) in pending.drain() {
+        let _ = tx.send(ControlMessage::Error {
+            request_id: Some(request_id),
+            message: "Remote connection lost".to_string(),
+        });
+    }
+    drop(pending);
+    conn.pending_request_order.lock().await.clear();
+
+    for handle in conn.task_handles {
+        handle.abort();
+    }
+}
+
+fn peer_supports_request_ids(peer_version: Option<u32>) -> bool {
+    peer_version >= Some(MIN_REQUEST_ID_VERSION)
+}
+
+pub async fn register_pending_response(
+    pending: &PendingResponses,
+    pending_order: &PendingResponseOrder,
+    request_id: Uuid,
+    response_tx: ResponseChannel,
+    peer_version: Option<u32>,
+) {
+    pending.lock().await.insert(request_id, response_tx);
+    if !peer_supports_request_ids(peer_version) {
+        pending_order.lock().await.push_back(request_id);
+    }
+}
+
+pub async fn remove_pending_response(
+    pending: &PendingResponses,
+    pending_order: &PendingResponseOrder,
+    request_id: Uuid,
+) -> Option<ResponseChannel> {
+    let removed = pending.lock().await.remove(&request_id);
+    if removed.is_some() {
+        let mut order = pending_order.lock().await;
+        if let Some(pos) = order.iter().position(|queued_id| *queued_id == request_id) {
+            order.remove(pos);
+        }
+    }
+    removed
+}
+
 pub async fn deliver_pending_response(
     pending: &PendingResponses,
+    pending_order: &PendingResponseOrder,
     control_msg: ControlMessage,
+    peer_version: Option<u32>,
 ) -> bool {
-    let Some(response_id) = control_msg.response_id() else {
-        return false;
+    if let Some(response_id) = control_msg.response_id() {
+        let Some(response_tx) =
+            remove_pending_response(pending, pending_order, response_id).await
+        else {
+            return false;
+        };
+        let _ = response_tx.send(control_msg);
+        return true;
     };
-    let mut pending_lock = pending.lock().await;
-    let Some(response_tx) = pending_lock.remove(&response_id) else {
+
+    if peer_supports_request_ids(peer_version) {
         return false;
-    };
-    let _ = response_tx.send(control_msg);
-    true
+    }
+
+    loop {
+        let next_request_id = {
+            let mut order = pending_order.lock().await;
+            order.pop_front()
+        };
+
+        let Some(request_id) = next_request_id else {
+            return false;
+        };
+        let Some(response_tx) = pending.lock().await.remove(&request_id) else {
+            continue;
+        };
+        let _ = response_tx.send(control_msg);
+        return true;
+    }
+}
+
+pub async fn clear_remote_if_instance(state: &AppState, instance_id: Uuid) -> bool {
+    let mut remote = state.remote.write().await;
+    if remote.as_ref().map(|conn| conn.instance_id) == Some(instance_id) {
+        *remote = None;
+        true
+    } else {
+        false
+    }
 }
 
 impl AppState {
@@ -122,16 +208,7 @@ pub async fn disconnect_remote(state: &AppState, clear_creds: bool) {
         remote.take()
     };
     if let Some(conn) = connection {
-        let mut pending = conn.pending_requests.lock().await;
-        for (request_id, tx) in pending.drain() {
-            let _ = tx.send(ControlMessage::Error {
-                request_id: Some(request_id),
-                message: "Remote connection lost".to_string(),
-            });
-        }
-        for handle in conn.task_handles {
-            handle.abort();
-        }
+        abort_remote_connection(conn).await;
     }
     *state.fingerprint.write().await = None;
     if clear_creds {
@@ -164,22 +241,39 @@ mod tests {
     #[tokio::test]
     async fn delivers_out_of_order_responses_by_request_id() {
         let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let pending_order: PendingResponseOrder = Arc::new(Mutex::new(VecDeque::new()));
         let request_a = Uuid::new_v4();
         let request_b = Uuid::new_v4();
         let (tx_a, rx_a) = oneshot::channel();
         let (tx_b, rx_b) = oneshot::channel();
-        pending.lock().await.insert(request_a, tx_a);
-        pending.lock().await.insert(request_b, tx_b);
+        register_pending_response(
+            &pending,
+            &pending_order,
+            request_a,
+            tx_a,
+            Some(MIN_REQUEST_ID_VERSION),
+        )
+        .await;
+        register_pending_response(
+            &pending,
+            &pending_order,
+            request_b,
+            tx_b,
+            Some(MIN_REQUEST_ID_VERSION),
+        )
+        .await;
 
         assert!(
             deliver_pending_response(
                 &pending,
+                &pending_order,
                 ControlMessage::BrowseResponse {
                     request_id: Some(request_b),
                     hostname: "remote".to_string(),
                     cwd: "/b".to_string(),
                     entries: vec![],
                 },
+                Some(MIN_REQUEST_ID_VERSION),
             )
             .await
         );
@@ -201,12 +295,14 @@ mod tests {
         assert!(
             deliver_pending_response(
                 &pending,
+                &pending_order,
                 ControlMessage::BrowseResponse {
                     request_id: Some(request_a),
                     hostname: "remote".to_string(),
                     cwd: "/a".to_string(),
                     entries: vec![],
                 },
+                Some(MIN_REQUEST_ID_VERSION),
             )
             .await
         );
@@ -230,17 +326,27 @@ mod tests {
     async fn disconnect_remote_fails_pending_requests() {
         let state = AppState::new(test_config());
         let pending_requests: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let pending_request_order: PendingResponseOrder = Arc::new(Mutex::new(VecDeque::new()));
         let request_id = Uuid::new_v4();
         let (tx, rx) = oneshot::channel();
-        pending_requests.lock().await.insert(request_id, tx);
+        register_pending_response(
+            &pending_requests,
+            &pending_request_order,
+            request_id,
+            tx,
+            Some(MIN_REQUEST_ID_VERSION),
+        )
+        .await;
         let (request_tx, _request_rx) = mpsc::unbounded_channel::<ControlMessage>();
         let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
         *state.remote.write().await = Some(RemoteConnection {
+            instance_id: Uuid::new_v4(),
             hostname: "remote".to_string(),
             root_dir: "/".to_string(),
             tx: request_tx,
             pending_requests: pending_requests.clone(),
+            pending_request_order,
             frame_tx,
             task_handles: vec![],
             peer_version: None,
@@ -260,6 +366,75 @@ mod tests {
         }
 
         assert!(pending_requests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_remote_if_instance_only_clears_matching_connection() {
+        let state = AppState::new(test_config());
+        let current_id = Uuid::new_v4();
+        let stale_id = Uuid::new_v4();
+        let (request_tx, _request_rx) = mpsc::unbounded_channel::<ControlMessage>();
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let pending_requests: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let pending_request_order: PendingResponseOrder = Arc::new(Mutex::new(VecDeque::new()));
+
+        *state.remote.write().await = Some(RemoteConnection {
+            instance_id: current_id,
+            hostname: "remote".to_string(),
+            root_dir: "/".to_string(),
+            tx: request_tx,
+            pending_requests,
+            pending_request_order,
+            frame_tx,
+            task_handles: vec![],
+            peer_version: None,
+        });
+
+        assert!(!clear_remote_if_instance(&state, stale_id).await);
+        assert_eq!(
+            state.remote.read().await.as_ref().map(|conn| conn.instance_id),
+            Some(current_id)
+        );
+
+        assert!(clear_remote_if_instance(&state, current_id).await);
+        assert!(state.remote.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn delivers_fifo_response_for_legacy_peer_without_request_id() {
+        let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let pending_order: PendingResponseOrder = Arc::new(Mutex::new(VecDeque::new()));
+        let request_id = Uuid::new_v4();
+        let (tx, rx) = oneshot::channel();
+
+        register_pending_response(&pending, &pending_order, request_id, tx, Some(2)).await;
+
+        assert!(
+            deliver_pending_response(
+                &pending,
+                &pending_order,
+                ControlMessage::InfoResponse {
+                    request_id: None,
+                    hostname: "legacy".to_string(),
+                    root_dir: "/".to_string(),
+                },
+                Some(2),
+            )
+            .await
+        );
+
+        match rx.await.expect("legacy request should resolve") {
+            ControlMessage::InfoResponse {
+                request_id,
+                hostname,
+                root_dir,
+            } => {
+                assert_eq!(request_id, None);
+                assert_eq!(hostname, "legacy");
+                assert_eq!(root_dir, "/");
+            }
+            other => panic!("unexpected legacy response: {other:?}"),
+        }
     }
 }
 
