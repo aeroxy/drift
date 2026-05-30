@@ -6,16 +6,12 @@ import ConnectionModal from "./components/ConnectionModal";
 import FilePane from "./components/FilePane";
 import Toolbar from "./components/Toolbar";
 import type { SelectModifiers } from "./components/FileRow";
-import { parseAutocompletePath, shouldUseCachedSuggestions } from "./utils/pathAutocomplete";
-
-function getRootRelativePath(path: string, root: string): string | null {
-  const rootPrefix = root === "/" ? root : root.endsWith("/") ? root : `${root}/`;
-
-  if (path === root) return ".";
-  if (path.startsWith(rootPrefix)) return path.slice(rootPrefix.length) || ".";
-
-  return null;
-}
+import {
+  parseAutocompletePath,
+  shouldUseCachedSuggestions,
+  getRootRelativePath,
+  resolveSuggestionBrowsePath,
+} from "./utils/pathAutocomplete";
 
 export default function App() {
   // Local state
@@ -59,6 +55,7 @@ export default function App() {
   const lastClickedLocalRef = useRef<number | null>(null);
   const lastClickedRemoteRef = useRef<number | null>(null);
   const localRootDirRef = useRef("");
+  const remoteRootDirRef = useRef("");
 
   const { transfers, startTransfer, updateProgress, completeTransfer, failTransfer, hasActiveTransfers } = useTransfer();
 
@@ -99,6 +96,7 @@ export default function App() {
         setRemoteInfo({ hostname: "...", cwd: "..." });
         setRemoteHostname(undefined);
         setRemotePath(".");
+        remoteRootDirRef.current = "";
         setRemoteSelected(new Set());
         lastClickedRemoteRef.current = null;
       }
@@ -175,6 +173,9 @@ export default function App() {
   const { connected, send } = useWebSocket((msg: ControlMessage) => {
     switch (msg.type) {
       case "BrowseResponse":
+        if (!remoteRootDirRef.current) {
+          remoteRootDirRef.current = msg.cwd;
+        }
         lastGoodRemotePathRef.current = msg.cwd;
         setRemoteInfo({ hostname: msg.hostname, cwd: msg.cwd });
         setRemoteHostname(msg.hostname);
@@ -189,6 +190,7 @@ export default function App() {
           setRemoteInfo({ hostname: "...", cwd: "..." });
           setRemoteHostname(undefined);
           setRemotePath(".");
+          remoteRootDirRef.current = "";
           setRemoteSelected(new Set());
           lastClickedRemoteRef.current = null;
           setFingerprint(null);
@@ -353,19 +355,8 @@ export default function App() {
         .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
         .map((e) => `${localInfo.cwd}/${e.name}`);
     }
-    let relParent: string;
-    const relativeParent = root ? getRootRelativePath(parentDir, root) : null;
-    const relativeInput = root ? getRootRelativePath(inputValue, root) : null;
-    if (relativeParent !== null) {
-      relParent = relativeParent;
-    } else if (root && relativeInput !== null) {
-      // inputValue is at or below root_dir, but parentDir is outside — browse root_dir
-      relParent = ".";
-    } else if (root) {
-      return []; // completely outside root_dir — no suggestions
-    } else {
-      relParent = parentDir;
-    }
+    const relParent = root ? resolveSuggestionBrowsePath(inputValue, root) : parentDir;
+    if (relParent === null) return [];
     try {
       const res = await fetch(`/api/browse?path=${encodeURIComponent(relParent)}`);
       if (!res.ok) return [];
@@ -382,14 +373,17 @@ export default function App() {
   const fetchRemoteSuggestions = useCallback(async (inputValue: string): Promise<string[]> => {
     if (!connected || !hasRemote) return [];
     const { parentDir, prefix } = parseAutocompletePath(inputValue);
+    const root = remoteRootDirRef.current;
     // Use cached entries when browsing the current remote cwd
     if (shouldUseCachedSuggestions(inputValue, remoteInfo.cwd)) {
       return remoteEntries
         .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
         .map((e) => `${remoteInfo.cwd}/${e.name}`);
     }
+    const relParent = root ? resolveSuggestionBrowsePath(inputValue, root) : parentDir;
+    if (relParent === null) return [];
     try {
-      const res = await fetch(`/api/browse-remote?path=${encodeURIComponent(parentDir)}`);
+      const res = await fetch(`/api/browse-remote?path=${encodeURIComponent(relParent)}`);
       if (!res.ok) return [];
       const data: BrowseResponse = await res.json();
       return data.entries
