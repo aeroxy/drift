@@ -56,7 +56,7 @@ pub async fn browse_remote(
     Query(params): Query<BrowseParams>,
 ) -> Result<Json<BrowseResponse>, StatusCode> {
     let request_id = Uuid::new_v4();
-    let response_rx = {
+    let (response_rx, pending_requests, pending_request_order) = {
         let remote = state.remote.read().await;
         let remote_conn = remote.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
 
@@ -82,7 +82,11 @@ pub async fn browse_remote(
             .await;
             return Err(StatusCode::BAD_REQUEST);
         }
-        response_rx
+        (
+            response_rx,
+            remote_conn.pending_requests.clone(),
+            remote_conn.pending_request_order.clone(),
+        )
     }; // lock released here
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
@@ -106,14 +110,12 @@ pub async fn browse_remote(
         Ok(Ok(_)) => Err(StatusCode::BAD_GATEWAY),
         Ok(Err(_)) => Err(StatusCode::BAD_GATEWAY),
         Err(_) => {
-            if let Some(remote_conn) = state.remote.read().await.as_ref() {
-                let _ = crate::server::remove_pending_response(
-                    &remote_conn.pending_requests,
-                    &remote_conn.pending_request_order,
-                    request_id,
-                )
-                .await;
-            }
+            let _ = crate::server::remove_pending_response(
+                &pending_requests,
+                &pending_request_order,
+                request_id,
+            )
+            .await;
             Err(StatusCode::GATEWAY_TIMEOUT)
         }
     }
