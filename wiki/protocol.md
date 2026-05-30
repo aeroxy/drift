@@ -24,6 +24,14 @@ Control messages are JSON, serialized with `serde` using `#[serde(tag = "type")]
 | `Ping` / `Pong` | `request_id?: Uuid` | bidirectional | Keep-alive |
 | `Error` | `request_id?: Uuid`, `message: String` | either | Generic error |
 
+## Protocol Versions
+
+- **v1**: Original encrypted control/data framing
+- **v2**: Multi-file data frame support (`file_index` in binary frames)
+- **v3**: Correlated browse/info/ping request ids
+
+New binaries advertise protocol v3 during the `KeyExchange`. Older v2 peers remain supported: they ignore request ids on incoming requests and may reply without a `request_id`.
+
 ### Enum: `Direction`
 
 ```rust
@@ -90,9 +98,11 @@ decode_data_frame(payload)                   -> (Uuid, u64, &[u8])
 
 `ControlMessage::is_request()` identifies messages that expect a response. Each side maintains a `HashMap<Uuid, oneshot::Sender<ControlMessage>>` (`pending`) keyed by the protocol `request_id`.
 
-Browse/info/ping requests carry an optional `request_id` that is echoed back on `BrowseResponse`, `InfoResponse`, `Pong`, and request-scoped `Error` replies. `TransferRequest`/`TransferAccepted` already use the transfer UUID as their correlation key.
+On v3 peers, browse/info/ping requests carry an optional `request_id` that is echoed back on `BrowseResponse`, `InfoResponse`, `Pong`, and request-scoped `Error` replies. `TransferRequest`/`TransferAccepted` already use the transfer UUID as their correlation key.
 
-Pending requests are registered before enqueueing the outbound control message and are removed on success, timeout, or disconnect. Responses are never matched by arrival order.
+Pending requests are registered before enqueueing the outbound control message and are removed on success, timeout, or disconnect.
+
+For legacy v2 peers that do not echo `request_id`, responses fall back to FIFO delivery order. That preserves interoperability with older binaries while keeping full correlation for v3 peers.
 
 ## REST API
 

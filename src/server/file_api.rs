@@ -65,13 +65,21 @@ pub async fn browse_remote(
             request_id: Some(request_id),
             path: params.path.clone(),
         };
-        remote_conn
-            .pending_requests
-            .lock()
-            .await
-            .insert(request_id, response_tx);
+        crate::server::register_pending_response(
+            &remote_conn.pending_requests,
+            &remote_conn.pending_request_order,
+            request_id,
+            response_tx,
+            remote_conn.peer_version,
+        )
+        .await;
         if remote_conn.tx.send(msg).is_err() {
-            remote_conn.pending_requests.lock().await.remove(&request_id);
+            let _ = crate::server::remove_pending_response(
+                &remote_conn.pending_requests,
+                &remote_conn.pending_request_order,
+                request_id,
+            )
+            .await;
             return Err(StatusCode::BAD_REQUEST);
         }
         response_rx
@@ -79,19 +87,19 @@ pub async fn browse_remote(
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
         Ok(Ok(ControlMessage::BrowseResponse {
-            request_id: Some(response_id),
+            request_id: response_id,
             hostname,
             cwd,
             entries,
-        })) if response_id == request_id => Ok(Json(BrowseResponse {
+        })) if response_id.is_none() || response_id == Some(request_id) => Ok(Json(BrowseResponse {
             hostname,
             cwd,
             entries,
         })),
         Ok(Ok(ControlMessage::Error {
-            request_id: Some(response_id),
+            request_id: response_id,
             message,
-        })) if response_id == request_id => {
+        })) if response_id.is_none() || response_id == Some(request_id) => {
             tracing::warn!("Remote browse error: {}", message);
             Err(StatusCode::BAD_GATEWAY)
         }
@@ -99,7 +107,12 @@ pub async fn browse_remote(
         Ok(Err(_)) => Err(StatusCode::BAD_GATEWAY),
         Err(_) => {
             if let Some(remote_conn) = state.remote.read().await.as_ref() {
-                remote_conn.pending_requests.lock().await.remove(&request_id);
+                let _ = crate::server::remove_pending_response(
+                    &remote_conn.pending_requests,
+                    &remote_conn.pending_request_order,
+                    request_id,
+                )
+                .await;
             }
             Err(StatusCode::GATEWAY_TIMEOUT)
         }

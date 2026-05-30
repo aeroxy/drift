@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
@@ -59,6 +59,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         protocol_version,
     }) = serde_json::from_str(&first_msg)
     {
+        let connection_id = Uuid::new_v4();
         let peer_version = protocol_version;
         tracing::info!(
             "Server-to-server connection detected, completing handshake (peer version: {:?})",
@@ -189,7 +190,9 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<ControlMessage>();
 
         let pending = Arc::new(Mutex::new(HashMap::<Uuid, ResponseChannel>::new()));
+        let pending_order = Arc::new(Mutex::new(VecDeque::<Uuid>::new()));
         let pending_read = pending.clone();
+        let pending_order_read = pending_order.clone();
 
         let crypto_write = crypto.clone();
         let crypto_read = crypto.clone();
@@ -362,7 +365,9 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     // Response to one of our outgoing requests
                                     let _ = crate::server::deliver_pending_response(
                                         &pending_read,
+                                        &pending_order_read,
                                         control_msg,
+                                        peer_version,
                                     )
                                     .await;
                                 }
@@ -394,14 +399,16 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         //
         // The swap is done under a single write-lock so there is no window where
         // state.remote is None — browser requests are never left without a peer.
-        let previous_remote = {
+        let mut previous_remote = {
             let mut remote = state.remote.write().await;
             let prev = remote.take();
             *remote = Some(RemoteConnection {
+                instance_id: connection_id,
                 hostname: "remote".to_string(),
                 root_dir: "/".to_string(),
                 tx: request_tx.clone(),
                 pending_requests: pending.clone(),
+                pending_request_order: pending_order.clone(),
                 frame_tx: frame_tx.clone(),
                 task_handles: vec![
                     request_handle.abort_handle(),
@@ -419,7 +426,14 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         // Send InfoRequest to get client's hostname and root_dir
         let request_id = Uuid::new_v4();
         let (info_tx, info_rx) = tokio::sync::oneshot::channel();
-        pending.lock().await.insert(request_id, info_tx);
+        crate::server::register_pending_response(
+            &pending,
+            &pending_order,
+            request_id,
+            info_tx,
+            peer_version,
+        )
+        .await;
         if request_tx
             .send(ControlMessage::InfoRequest {
                 request_id: Some(request_id),
@@ -428,6 +442,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         {
             let state_clone = state.clone();
             let pending_cleanup = pending.clone();
+            let pending_order_cleanup = pending_order.clone();
             tokio::spawn(async move {
                 match tokio::time::timeout(std::time::Duration::from_secs(5), info_rx).await {
                     Ok(Ok(ControlMessage::InfoResponse {
@@ -435,17 +450,26 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     })) => {
                         let mut remote = state_clone.remote.write().await;
                         if let Some(ref mut remote_conn) = *remote {
+                            if remote_conn.instance_id != connection_id {
+                                return;
+                            }
                             remote_conn.hostname = hostname;
                             remote_conn.root_dir = root_dir;
                         }
                     }
                     _ => {
-                        pending_cleanup.lock().await.remove(&request_id);
+                        let _ = crate::server::remove_pending_response(
+                            &pending_cleanup,
+                            &pending_order_cleanup,
+                            request_id,
+                        )
+                        .await;
                     }
                 }
             });
         } else {
-            pending.lock().await.remove(&request_id);
+            let _ = crate::server::remove_pending_response(&pending, &pending_order, request_id)
+                .await;
         }
 
         tokio::select! {
@@ -458,19 +482,27 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         // would break subsequent browser requests that forward through the
         // persistent peer link.
         let had_previous_remote = previous_remote.is_some();
-        {
+        let restored_previous = {
             let mut remote = state.remote.write().await;
-            if let Some(prev) = previous_remote {
-                *remote = Some(prev);
+            if remote.as_ref().map(|conn| conn.instance_id) == Some(connection_id) {
+                *remote = previous_remote.take();
+                true
             } else {
-                *remote = None;
+                false
             }
+        };
+        if !restored_previous {
+            if let Some(prev) = previous_remote.take() {
+                crate::server::abort_remote_connection(prev).await;
+            }
+            tracing::info!("Server-to-server connection closed");
+            return;
         }
-        // Only clear the fingerprint when the persistent peer itself disconnected.
-        // If we're restoring a prior connection, the fingerprint for that peer
-        // must remain so the browser UI continues to show it.
-        if !had_previous_remote {
-            *state.fingerprint.write().await = None;
+        {
+            let remote = state.remote.read().await;
+            if !had_previous_remote && remote.is_none() {
+                *state.fingerprint.write().await = None;
+            }
         }
         let has_remote = state.remote.read().await.is_some();
         let _ = state
@@ -715,6 +747,8 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
         if let Some(ref remote_conn) = *remote {
             let request_tx = remote_conn.tx.clone();
             let pending_requests = remote_conn.pending_requests.clone();
+            let pending_request_order = remote_conn.pending_request_order.clone();
+            let peer_version = remote_conn.peer_version;
             drop(remote);
             let msg = if msg.is_request() && msg.request_id().is_none() {
                 msg.with_request_id(Uuid::new_v4())
@@ -724,7 +758,14 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
             let request_id = msg.request_id();
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             if let Some(request_id) = request_id {
-                pending_requests.lock().await.insert(request_id, response_tx);
+                crate::server::register_pending_response(
+                    &pending_requests,
+                    &pending_request_order,
+                    request_id,
+                    response_tx,
+                    peer_version,
+                )
+                .await;
             }
             if request_tx.send(msg).is_ok() {
                 match tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await {
@@ -737,7 +778,12 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
                     }
                     Err(_) => {
                         if let Some(request_id) = request_id {
-                            pending_requests.lock().await.remove(&request_id);
+                            let _ = crate::server::remove_pending_response(
+                                &pending_requests,
+                                &pending_request_order,
+                                request_id,
+                            )
+                            .await;
                         }
                         return Some(ControlMessage::Error {
                             request_id,
@@ -747,7 +793,12 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
                 }
             }
             if let Some(request_id) = request_id {
-                pending_requests.lock().await.remove(&request_id);
+                let _ = crate::server::remove_pending_response(
+                    &pending_requests,
+                    &pending_request_order,
+                    request_id,
+                )
+                .await;
             }
             // tx.send failed: channel closed
             return Some(ControlMessage::Error {
