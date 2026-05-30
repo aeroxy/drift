@@ -89,7 +89,7 @@ pub async fn handle_browser_transfer(
         destination_path,
     };
 
-    if let Some(ref remote_conn) = *remote {
+    let (pending_requests, pending_request_order) = if let Some(ref remote_conn) = *remote {
         crate::server::register_pending_response(
             &remote_conn.pending_requests,
             &remote_conn.pending_request_order,
@@ -108,7 +108,14 @@ pub async fn handle_browser_transfer(
             send_error(&ws_tx, id, "Failed to send to remote");
             return;
         }
-    }
+        (
+            remote_conn.pending_requests.clone(),
+            remote_conn.pending_request_order.clone(),
+        )
+    } else {
+        send_error(&ws_tx, id, "No remote connection");
+        return;
+    };
     drop(remote);
 
     // 60s timeout: TransferAccepted may be delayed if data from a prior transfer
@@ -163,14 +170,12 @@ pub async fn handle_browser_transfer(
         Ok(Ok(_)) => send_error(&ws_tx, id, "Unexpected response from remote"),
         Ok(Err(_)) => send_error(&ws_tx, id, "Remote response channel closed"),
         Err(_) => {
-            if let Some(remote_conn) = state.remote.read().await.as_ref() {
-                let _ = crate::server::remove_pending_response(
-                    &remote_conn.pending_requests,
-                    &remote_conn.pending_request_order,
-                    id,
-                )
-                .await;
-            }
+            let _ = crate::server::remove_pending_response(
+                &pending_requests,
+                &pending_request_order,
+                id,
+            )
+            .await;
             send_error(&ws_tx, id, "Remote response timeout");
         }
     }
