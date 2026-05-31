@@ -92,7 +92,7 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          onFocus={() => setFocused(true)}
+          onFocus={() => setFocused(true)} // intentionally no select-all: lets user click to place cursor
           onBlur={() => { setFocused(false); reset(); }}
           className="w-full bg-transparent border border-transparent rounded px-2 py-0.5 font-mono text-xs text-zinc-300 focus:outline-none focus:border-zinc-600 focus:bg-zinc-900 focus:text-zinc-100 transition-colors"
         />

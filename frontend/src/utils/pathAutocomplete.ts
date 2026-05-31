@@ -16,9 +16,10 @@ export function shouldUseCachedSuggestions(inputValue: string, cwd: string): boo
 }
 
 export function getRootRelativePath(path: string, root: string): string | null {
-  const rootPrefix = root === "/" ? root : root.endsWith("/") ? root : `${root}/`;
+  const normalizedRoot = root !== "/" && root.endsWith("/") ? root.slice(0, -1) : root;
+  const rootPrefix = normalizedRoot === "/" ? normalizedRoot : `${normalizedRoot}/`;
 
-  if (path === root) return ".";
+  if (path === normalizedRoot) return ".";
   if (path.startsWith(rootPrefix)) return path.slice(rootPrefix.length) || ".";
 
   return null;
@@ -33,4 +34,8 @@ export function resolveSuggestionBrowsePath(inputValue: string, root: string): s
   if (relativeInput !== null) return ".";
 
   return null;
+}
+
+export function joinPath(dir: string, name: string): string {
+  return dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 }
