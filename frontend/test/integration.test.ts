@@ -932,3 +932,137 @@ describe('drift multi-entry transfer', () => {
     }
   }, 180_000);
 });
+
+// ── destination_path staging + validation ─────────────────────────────────────
+//
+// Feature coverage for the behavior change: the receiver stages its `.drift` temp
+// dir under the *destination* directory (so a read-only served root still works
+// when the destination is writable), removes the empty staging dir after finalize,
+// and rejects any `destination_path` that escapes the served root — both a
+// parent-traversal (`..`) path and an absolute path.
+
+describe('drift destination_path staging and validation', () => {
+  let hostProc: DriftProcess | null = null;
+  let clientProc: DriftProcess | null = null;
+  let tmpRoot: string;
+  let hostDir: string;
+  let clientDir: string;
+
+  beforeAll(async () => {
+    tmpRoot = fs.mkdtempSync('/tmp/drift-destval-');
+    hostDir = path.join(tmpRoot, 'host');
+    clientDir = path.join(tmpRoot, 'client');
+    // Host (remote) holds a folder + file to pull; client holds a file to push.
+    fs.mkdirSync(path.join(hostDir, 'pkg', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(hostDir, 'doc.txt'), 'doc-body');
+    fs.writeFileSync(path.join(hostDir, 'pkg', 'nested', 'inner.txt'), 'inner-body');
+    fs.mkdirSync(clientDir, { recursive: true });
+    fs.writeFileSync(path.join(clientDir, 'cdoc.txt'), 'cdoc-body');
+
+    const hostPort = await getAvailablePort();
+    const clientPort = await getAvailablePort();
+    hostProc = new DriftProcess({ port: hostPort, cwd: hostDir });
+    clientProc = new DriftProcess({
+      port: clientPort,
+      cwd: clientDir,
+      target: `127.0.0.1:${hostPort}`,
+    });
+    await hostProc.start();
+    await clientProc.start();
+    await Promise.all([pollForRemote(hostProc.baseUrl), pollForRemote(clientProc.baseUrl)]);
+  }, 60_000);
+
+  afterAll(async () => {
+    await Promise.all([hostProc?.stop(), clientProc?.stop()]);
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }, 30_000);
+
+  function sendTransfer(
+    ws: WsBrowserClient,
+    direction: 'Pull' | 'Push',
+    relativePath: string,
+    destinationPath: string,
+    entry: FileEntry,
+  ): Promise<void> {
+    const id = crypto.randomUUID();
+    const done = ws.waitForTransferComplete(id, 60_000);
+    ws.send({
+      type: 'TransferRequest',
+      id,
+      entries: [{
+        relative_path: relativePath,
+        size: entry.size,
+        is_dir: entry.is_dir,
+        permissions: entry.permissions,
+      }],
+      direction,
+      destination_path: destinationPath,
+    });
+    return done;
+  }
+
+  it('pulls a folder into a destination subdir and stages .drift under it (not the root)', async () => {
+    const entry = (await browseEntries(hostProc!.baseUrl)).find((e) => e.name === 'pkg');
+    expect(entry, 'host should expose pkg/').toBeDefined();
+
+    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+    try {
+      await sendTransfer(ws, 'Pull', 'pkg', 'sub', entry!);
+    } finally {
+      ws.close();
+    }
+
+    // Files land under the destination subdir.
+    expect(fs.readFileSync(path.join(clientDir, 'sub', 'pkg', 'nested', 'inner.txt'), 'utf-8')).toBe('inner-body');
+    // Staging happened under the destination, not the served root, and was cleaned up.
+    expect(fs.existsSync(path.join(clientDir, '.drift')), 'no .drift at served root').toBe(false);
+    expect(fs.existsSync(path.join(clientDir, 'sub', '.drift')), '.drift cleaned up under destination').toBe(false);
+  }, 60_000);
+
+  // Both validation branches: parent-traversal (`..`) and absolute. For the absolute
+  // case the destination_path is an absolute path to a sibling of the served root.
+  const escapeKinds = [
+    { label: 'a parent-traversal path (..)', kind: 'rel' as const },
+    { label: 'an absolute path', kind: 'abs' as const },
+  ];
+
+  it.each(escapeKinds)(
+    'rejects a Pull whose destination escapes the local root via $label',
+    async ({ kind }) => {
+      const entry = (await browseEntries(hostProc!.baseUrl)).find((e) => e.name === 'doc.txt');
+      expect(entry).toBeDefined();
+      const leaf = `escape-pull-${kind}`;
+      const target = path.join(tmpRoot, leaf); // clientDir/.. = tmpRoot
+      const dest = kind === 'abs' ? target : `../${leaf}`;
+
+      const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+      try {
+        await expect(sendTransfer(ws, 'Pull', 'doc.txt', dest, entry!)).rejects.toThrow();
+      } finally {
+        ws.close();
+      }
+      expect(fs.existsSync(target), `nothing written to ${target}`).toBe(false);
+    },
+    30_000,
+  );
+
+  it.each(escapeKinds)(
+    'rejects a Push whose destination escapes the remote root via $label',
+    async ({ kind }) => {
+      const entry = (await browseEntries(clientProc!.baseUrl)).find((e) => e.name === 'cdoc.txt');
+      expect(entry).toBeDefined();
+      const leaf = `escape-push-${kind}`;
+      const target = path.join(tmpRoot, leaf); // hostDir/.. = tmpRoot
+      const dest = kind === 'abs' ? target : `../${leaf}`;
+
+      const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+      try {
+        await expect(sendTransfer(ws, 'Push', 'cdoc.txt', dest, entry!)).rejects.toThrow();
+      } finally {
+        ws.close();
+      }
+      expect(fs.existsSync(target), `nothing written to ${target}`).toBe(false);
+    },
+    30_000,
+  );
+});
