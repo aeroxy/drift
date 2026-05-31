@@ -43,6 +43,12 @@ Browser (Machine A)    Server A            Server B (remote)
 7. When **Server B** is done, it sends `TransferComplete`. Server A's read loop receives it, calls `transfer_receiver.finalize_transfer()`, which fires the completion channel.
 8. `handle_browser_transfer()` unblocks, sends `TransferComplete` to the browser.
 
+## Temp staging
+
+The receiver (`transfer_receiver.rs`) stages incoming data in a `.drift/` temp dir under the **destination** directory — `root_dir/<destination_path>/.drift` — not under the served root. This matters when drift is launched from a read-only directory (e.g. `/`): the root may be unwritable while the chosen destination is writable. Co-locating `.drift` with the destination also keeps the temp file on the same filesystem as the final path, so the finalize rename stays atomic (no cross-device `EXDEV`). For the common `destination_path == "."` case this is identical to `root_dir/.drift`. The empty `.drift` dir is removed after a successful finalize.
+
+`destination_path` is validated by `validate_destination_path()` at the receiver entry points (`start_transfer` / `start_transfer_with_notify`) **before any I/O**: an absolute path or any `..` component is rejected with a `TransferError`. This prevents a malicious browser or peer from staging/writing files outside the served root (critical for a password-less server, where any peer can Push).
+
 ## Key Files
 
 | File | Role |

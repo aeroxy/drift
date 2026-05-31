@@ -28,6 +28,28 @@ pub struct TransferReceiver {
     active_transfers: Arc<Mutex<HashMap<Uuid, ActiveTransfer>>>,
 }
 
+/// Reject destination paths that could escape `root_dir`. A legitimate
+/// `destination_path` is always a relative subpath produced by panel navigation
+/// (or `.`); an absolute path or any `..` component signals a traversal attempt
+/// from a malicious browser or peer. The check is lexical (no filesystem access)
+/// so it holds even when the target does not yet exist — closing the TOCTOU gap
+/// where validating only existing parents lets non-existent traversal targets through.
+fn validate_destination_path(destination_path: &str) -> Result<(), String> {
+    use std::path::Component;
+    for component in std::path::Path::new(destination_path).components() {
+        if matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        ) {
+            return Err(format!(
+                "Invalid destination path (escapes root): {}",
+                destination_path
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl TransferReceiver {
     pub fn new(root_dir: PathBuf) -> Self {
         Self {
@@ -41,7 +63,8 @@ impl TransferReceiver {
         id: Uuid,
         entries: Vec<TransferEntry>,
         destination_path: String,
-    ) {
+    ) -> Result<(), String> {
+        validate_destination_path(&destination_path)?;
         tracing::info!(
             "Starting to receive transfer: {} ({} entries) to {}",
             id,
@@ -64,6 +87,7 @@ impl TransferReceiver {
                 completion_tx: None,
             },
         );
+        Ok(())
     }
 
     /// Like `start_transfer` but returns a receiver that fires once `finalize_transfer` completes.
@@ -73,7 +97,8 @@ impl TransferReceiver {
         id: Uuid,
         entries: Vec<TransferEntry>,
         destination_path: String,
-    ) -> oneshot::Receiver<Result<u64, String>> {
+    ) -> Result<oneshot::Receiver<Result<u64, String>>, String> {
+        validate_destination_path(&destination_path)?;
         tracing::info!(
             "Starting to receive transfer (with notify): {} ({} entries) to {}",
             id,
@@ -98,7 +123,7 @@ impl TransferReceiver {
             },
         );
 
-        rx
+        Ok(rx)
     }
 
     /// Write a chunk into the active transfer.
@@ -129,7 +154,13 @@ impl TransferReceiver {
                 .get(file_index as usize)
                 .ok_or_else(|| format!("Invalid file_index {} for transfer {}", file_index, id))?;
 
-            let drift_dir = self.root_dir.join(".drift");
+            // Stage temp files under the *destination* directory rather than the
+            // served root. The root may be read-only (e.g. drift launched from `/`)
+            // even when the chosen destination is writable. Co-locating `.drift` with
+            // the destination also keeps the temp file on the same filesystem as the
+            // final path, so the finalize rename stays atomic (no cross-device EXDEV).
+            let dest_dir = self.root_dir.join(&transfer.destination_path);
+            let drift_dir = dest_dir.join(".drift");
 
             let (temp_path, final_path) = if entry.is_dir {
                 // Directory: stage archive in .drift/, finalize renames in-place
@@ -141,10 +172,7 @@ impl TransferReceiver {
                     .file_name()
                     .ok_or_else(|| format!("Invalid path: {}", entry.relative_path))?;
 
-                let dest_path = self
-                    .root_dir
-                    .join(&transfer.destination_path)
-                    .join(file_name);
+                let dest_path = dest_dir.join(file_name);
 
                 // Validate that the destination is within root_dir (path traversal protection)
                 let root_canonical = self
@@ -276,7 +304,7 @@ impl TransferReceiver {
             // Ensure any directories that didn't have writers open are also handled
             for (idx, entry) in transfer.entries.iter().enumerate() {
                 if entry.is_dir {
-                    let path = self.archive_path(id, idx);
+                    let path = self.archive_path(&transfer.destination_path, id, idx);
                     if !temp_paths.contains(&path) {
                         temp_paths.push(path);
                     }
@@ -335,7 +363,7 @@ impl TransferReceiver {
 
                 for (idx, entry) in transfer.entries.iter().enumerate() {
                     if entry.is_dir {
-                        let archive_path = self.archive_path(id, idx);
+                        let archive_path = self.archive_path(&transfer.destination_path, id, idx);
                         tracing::info!(
                             "Decompressing archive {:?} to {:?}",
                             archive_path,
@@ -363,6 +391,14 @@ impl TransferReceiver {
                 }
             }
 
+            // Best-effort: remove the now-empty .drift staging dir from the
+            // destination. `remove_dir` only succeeds when the directory is empty,
+            // so concurrent transfers staging into the same dir are unaffected.
+            let _ = tokio::fs::remove_dir(
+                self.root_dir.join(&transfer.destination_path).join(".drift"),
+            )
+            .await;
+
             // Notify any waiters (e.g. Pull transfers waiting for completion)
             if let Some(tx) = transfer.completion_tx {
                 let _ = tx.send(Ok(transfer.total_bytes_written));
@@ -373,8 +409,10 @@ impl TransferReceiver {
     }
 
     /// Path to the temporary tar.gz archive for a directory entry in a transfer.
-    fn archive_path(&self, id: Uuid, index: usize) -> std::path::PathBuf {
+    /// Staged under the destination directory (see `receive_chunk`), not the served root.
+    fn archive_path(&self, destination_path: &str, id: Uuid, index: usize) -> std::path::PathBuf {
         self.root_dir
+            .join(destination_path)
             .join(".drift")
             .join(format!("{}_{}.tar.gz", id, index))
     }
@@ -420,5 +458,31 @@ impl TransferReceiver {
             let _ = tx.send(Err(error));
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_destination_path;
+
+    #[test]
+    fn accepts_legitimate_relative_destinations() {
+        for p in [".", "sub", "a/b/c", "client-sub1/client-sub2"] {
+            assert!(validate_destination_path(p).is_ok(), "should accept {p:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_traversal_and_absolute_destinations() {
+        for p in [
+            "..",
+            "../escape",
+            "a/../../escape",
+            "sub/..",
+            "/etc/passwd",
+            "/",
+        ] {
+            assert!(validate_destination_path(p).is_err(), "should reject {p:?}");
+        }
     }
 }
