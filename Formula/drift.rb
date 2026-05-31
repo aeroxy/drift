@@ -1,7 +1,7 @@
 class Drift < Formula
   desc "Encrypted bidirectional file transfer over WebSocket with an embedded web UI"
   homepage "https://github.com/aeroxy/drift"
-  version "0.4.2"
+  version "0.5.0"
   license "MIT"
 
   on_macos do
