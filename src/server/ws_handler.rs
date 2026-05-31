@@ -435,6 +435,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             request_id,
             info_tx,
             peer_version,
+            true,
         )
         .await;
         if request_tx
@@ -767,6 +768,7 @@ async fn handle_control_message(state: &AppState, msg: ControlMessage) -> Option
                     request_id,
                     response_tx,
                     peer_version,
+                    true,
                 )
                 .await;
             }
