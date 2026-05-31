@@ -71,6 +71,7 @@ pub async fn browse_remote(
             request_id,
             response_tx,
             remote_conn.peer_version,
+            true,
         )
         .await;
         if remote_conn.tx.send(msg).is_err() {

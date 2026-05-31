@@ -481,6 +481,7 @@ pub async fn connect_to_remote(
         request_id,
         info_tx,
         peer_version,
+        true,
     )
     .await;
     if request_tx

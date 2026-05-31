@@ -91,9 +91,10 @@ pub async fn register_pending_response(
     request_id: Uuid,
     response_tx: ResponseChannel,
     peer_version: Option<u32>,
+    use_fifo_fallback: bool,
 ) {
     pending.lock().await.insert(request_id, response_tx);
-    if !peer_supports_request_ids(peer_version) {
+    if use_fifo_fallback && !peer_supports_request_ids(peer_version) {
         pending_order.lock().await.push_back(request_id);
     }
 }
@@ -252,6 +253,7 @@ mod tests {
             request_a,
             tx_a,
             Some(MIN_REQUEST_ID_VERSION),
+            true,
         )
         .await;
         register_pending_response(
@@ -260,6 +262,7 @@ mod tests {
             request_b,
             tx_b,
             Some(MIN_REQUEST_ID_VERSION),
+            true,
         )
         .await;
 
@@ -335,6 +338,7 @@ mod tests {
             request_id,
             tx,
             Some(MIN_REQUEST_ID_VERSION),
+            true,
         )
         .await;
         let (request_tx, _request_rx) = mpsc::unbounded_channel::<ControlMessage>();
@@ -407,7 +411,7 @@ mod tests {
         let request_id = Uuid::new_v4();
         let (tx, rx) = oneshot::channel();
 
-        register_pending_response(&pending, &pending_order, request_id, tx, Some(2)).await;
+        register_pending_response(&pending, &pending_order, request_id, tx, Some(2), true).await;
 
         assert!(
             deliver_pending_response(
