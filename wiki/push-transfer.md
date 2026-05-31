@@ -49,8 +49,14 @@ Server A waits for `TransferFinalized` from Server B before forwarding `Transfer
    - Otherwise sets `expected_total`; the final chunk auto-triggers finalization and sends `TransferFinalized`
 8. Once `TransferFinalized` is received, `push_entries()` sends `TransferComplete` to the browser.
 9. **Server B**'s `finalize_transfer()`:
-   - Renames `.part` file to the final name
+   - Renames the staged temp file to the final name
    - If the transfer contained directories, decompresses the `.tar.gz` archive
+
+## Temp staging
+
+Server B (`transfer_receiver.rs`) stages incoming data in a `.drift/` temp dir under the **destination** directory — `root_dir/<destination_path>/.drift` — not under the served root. This keeps staging writable when the served root is read-only but the destination is writable, and keeps the temp file on the same filesystem as the final path so the finalize rename stays atomic (no cross-device `EXDEV`). For `destination_path == "."` this is identical to `root_dir/.drift`. The empty `.drift` dir is removed after a successful finalize.
+
+`destination_path` is validated by `validate_destination_path()` in `start_transfer` **before any I/O**: an absolute path or any `..` component is rejected with a `TransferError`. Since a Push receiver writes wherever the pushing peer asks, this is what stops a malicious or unauthenticated peer from writing files outside the served root.
 
 ## Key Files
 

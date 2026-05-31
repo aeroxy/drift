@@ -71,12 +71,17 @@ pub async fn handle_browser_transfer(
     // Binary frames from the remote can arrive before TransferAccepted is processed,
     // so the receiver must be ready or chunks would be silently dropped (and lost).
     let pull_done_rx = if direction == Direction::Pull {
-        Some(
-            state
-                .transfer_receiver
-                .start_transfer_with_notify(id, entries.clone(), destination_path.clone())
-                .await,
-        )
+        match state
+            .transfer_receiver
+            .start_transfer_with_notify(id, entries.clone(), destination_path.clone())
+            .await
+        {
+            Ok(rx) => Some(rx),
+            Err(e) => {
+                send_error(&ws_tx, id, &e);
+                return;
+            }
+        }
     } else {
         None
     };

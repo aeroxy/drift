@@ -86,8 +86,9 @@ cd frontend && bun dev
 - Protocol messages: serde tagged enum `ControlMessage` with `#[serde(tag = "type")]`
 - Binary frames: `[16-byte UUID][8-byte BE offset][chunk data]`
 - Encryption: encrypt-then-MAC via ChaCha20-Poly1305 AEAD, monotonic nonce counters
-- Path safety: all user-supplied paths canonicalized and checked against root dir before any I/O
+- Path safety: all user-supplied paths canonicalized and checked against root dir before any I/O. Transfer `destination_path` is additionally rejected by `validate_destination_path()` if absolute or containing `..`, at the receiver entry points (`start_transfer`/`start_transfer_with_notify`) before any I/O
 - Folder transfers: compressed to tar.gz in `.drift/` temp dir, decompressed on receiver
+- Receiver temp staging lives under the **destination** dir (`root_dir/<destination_path>/.drift`), not the served root — so a read-only root (e.g. drift launched from `/`) still works when the destination is writable, and finalize renames stay on one filesystem
 - `.drift/` directory is hidden from the web panel browse listing
 - When updating features, update README.md, this file (AGENTS.md / CLAUDE.md), **and the relevant wiki doc(s)**
 
