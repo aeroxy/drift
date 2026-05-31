@@ -424,13 +424,16 @@ pub async fn connect_to_remote(
                                         frame_tx_read.send(encode_control_frame(json.as_bytes()));
                                 }
                             } else {
-                                let _ = crate::server::deliver_pending_response(
+                                let delivered = crate::server::deliver_pending_response(
                                     &pending_read,
                                     &pending_order_read,
-                                    control_msg,
+                                    control_msg.clone(),
                                     peer_version,
                                 )
                                 .await;
+                                if !delivered {
+                                    tracing::warn!("Unhandled control message: {:?}", control_msg);
+                                }
                             }
                         }
                         other => {

@@ -11,6 +11,7 @@ import {
   shouldUseCachedSuggestions,
   getRootRelativePath,
   resolveSuggestionBrowsePath,
+  joinPath,
 } from "./utils/pathAutocomplete";
 
 export default function App() {
@@ -353,7 +354,7 @@ export default function App() {
     if (shouldUseCachedSuggestions(inputValue, localInfo.cwd)) {
       return localEntries
         .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
-        .map((e) => `${localInfo.cwd}/${e.name}`);
+        .map((e) => joinPath(localInfo.cwd, e.name));
     }
     const relParent = root ? resolveSuggestionBrowsePath(inputValue, root) : parentDir;
     if (relParent === null) return [];
@@ -363,7 +364,7 @@ export default function App() {
       const data: BrowseResponse = await res.json();
       return data.entries
         .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
-        .map((e) => `${data.cwd}/${e.name}`);
+        .map((e) => joinPath(data.cwd, e.name));
     } catch {
       return [];
     }
@@ -378,7 +379,7 @@ export default function App() {
     if (shouldUseCachedSuggestions(inputValue, remoteInfo.cwd)) {
       return remoteEntries
         .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
-        .map((e) => `${remoteInfo.cwd}/${e.name}`);
+        .map((e) => joinPath(remoteInfo.cwd, e.name));
     }
     const relParent = root ? resolveSuggestionBrowsePath(inputValue, root) : parentDir;
     if (relParent === null) return [];
@@ -388,7 +389,7 @@ export default function App() {
       const data: BrowseResponse = await res.json();
       return data.entries
         .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(prefix))
-        .map((e) => `${data.cwd}/${e.name}`);
+        .map((e) => joinPath(data.cwd, e.name));
     } catch {
       return [];
     }

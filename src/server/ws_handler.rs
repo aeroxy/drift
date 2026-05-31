@@ -363,13 +363,16 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     }
                                 } else {
                                     // Response to one of our outgoing requests
-                                    let _ = crate::server::deliver_pending_response(
+                                    let delivered = crate::server::deliver_pending_response(
                                         &pending_read,
                                         &pending_order_read,
-                                        control_msg,
+                                        control_msg.clone(),
                                         peer_version,
                                     )
                                     .await;
+                                    if !delivered {
+                                        tracing::warn!("Unhandled control message: {:?}", control_msg);
+                                    }
                                 }
                             }
                             other => {
