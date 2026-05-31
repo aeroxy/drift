@@ -1012,11 +1012,21 @@ describe('drift destination_path staging and validation', () => {
       ws.close();
     }
 
+    // For a pull, finalize (decompress + .drift cleanup) completes before the browser's
+    // TransferComplete fires, so this is already settled — but poll defensively to match
+    // the rest of the file and stay robust to any future reordering.
+    const innerPath = path.join(clientDir, 'sub', 'pkg', 'nested', 'inner.txt');
+    const stagingDir = path.join(clientDir, 'sub', '.drift');
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(innerPath) && !fs.existsSync(stagingDir)) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
     // Files land under the destination subdir.
-    expect(fs.readFileSync(path.join(clientDir, 'sub', 'pkg', 'nested', 'inner.txt'), 'utf-8')).toBe('inner-body');
+    expect(fs.readFileSync(innerPath, 'utf-8')).toBe('inner-body');
     // Staging happened under the destination, not the served root, and was cleaned up.
     expect(fs.existsSync(path.join(clientDir, '.drift')), 'no .drift at served root').toBe(false);
-    expect(fs.existsSync(path.join(clientDir, 'sub', '.drift')), '.drift cleaned up under destination').toBe(false);
+    expect(fs.existsSync(stagingDir), '.drift cleaned up under destination').toBe(false);
   }, 60_000);
 
   // Both validation branches: parent-traversal (`..`) and absolute. For the absolute
