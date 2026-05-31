@@ -10,7 +10,7 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
 
 - **Rust backend** (axum + tokio): HTTP server, WebSocket handler, file I/O, encryption
 - **React frontend** (Vite + TypeScript + Tailwind): two-pane file browser, embedded via `rust-embed`
-- **Protocol**: JSON control messages (text frames) + binary file chunks (binary frames), all encrypted after handshake
+- **Protocol**: JSON control messages (text frames) + binary file chunks (binary frames), all encrypted after handshake. v3 adds correlated request/response IDs for concurrent requests.
 
 ## Key Directories
 
@@ -18,7 +18,7 @@ drift is a single Rust binary that enables bidirectional, encrypted file/folder 
   - `ws_handler.rs` — WebSocket connection handler (browser + server-to-server)
   - `browser_transfer.rs` — Transfer orchestration for browser-initiated transfers; `send_entries()` is shared by push and pull
   - `transfer_receiver.rs` — Incoming file writer + tar.gz decompression; `start_transfer_with_notify()` for pull completion signaling
-  - `file_api.rs` — REST endpoints (/api/browse, /api/info, /api/connect, /api/reconnect, /api/disconnect). `/api/info` exposes `can_reconnect` + `last_target` so the FE can render a Reconnect button after an unexpected drop.
+  - `file_api.rs` — REST endpoints (/api/browse, /api/browse-remote, /api/info, /api/connect, /api/reconnect, /api/disconnect). `/api/info` exposes `can_reconnect` + `last_target` so the FE can render a Reconnect button after an unexpected drop. `/api/browse-remote` fetches remote directory entries via REST without WS side effects (for address bar autocomplete).
 - `src/client/` — outbound WS connection to `--target`
   - `mod.rs` — Bidirectional encrypted WS connection; shared types (`WsWrite`, `WsRead`, `DecryptedFrame`) and `recv_encrypted_frame()`
   - `send.rs` — Direct file send mode (connect, transfer, exit); shared helpers `send_encrypted_control()`, `recv_encrypted_control()`, `format_bytes()`
@@ -102,6 +102,7 @@ The `wiki/` directory contains canonical documentation for each feature. **Alway
 | [wiki/protocol.md](wiki/protocol.md) | `ControlMessage` enum, binary frame format, connection types |
 | [wiki/encryption.md](wiki/encryption.md) | X25519 handshake, HKDF key derivation, ChaCha20-Poly1305 nonces |
 | [wiki/cli.md](wiki/cli.md) | CLI subcommands: serve, send, ls, pull |
+| [wiki/address-bar-browsing.md](wiki/address-bar-browsing.md) | Address bar autocomplete, /api/browse-remote endpoint |
 
 ## Requirements
 
