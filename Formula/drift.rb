@@ -1,20 +1,20 @@
 class Drift < Formula
   desc "Encrypted bidirectional file transfer over WebSocket with an embedded web UI"
   homepage "https://github.com/aeroxy/drift"
-  version "0.5.0"
+  version "0.5.1"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/aeroxy/drift/releases/download/#{version}/drift_macos_arm64.zip"
-      sha256 "7471948152b11b8e3ae9f41b2cbe6da4da95fe10578e230e420a85c84998663b"
+      sha256 "088ac9693898a8a094d87aa6c0f5b3419f7d97f8b754cbe3358c1a3409e23821"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/aeroxy/drift/releases/download/#{version}/drift_linux_x86_64.zip"
-      sha256 "b37984f2806a4ca75835c4c33acd9845eb6ecb092574d7e540b6e148d9585165"
+      sha256 "9bfbeab87bae275097a2f4694b78fe5a6a46e4902aa02374869ecfe7191151bd"
     end
   end
 
