@@ -104,37 +104,55 @@ describe('destination_path traversal is rejected', () => {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }, 30_000);
 
-  it('rejects a Pull whose destination escapes the local root', async () => {
-    const entry = (await browseRoot(host.baseUrl)).find((e) => e.name === 'host-file.txt');
-    expect(entry).toBeDefined();
+  // Both validation branches: a parent-traversal (`..`) path and an absolute path.
+  // For the absolute case the destination_path IS an absolute path pointing outside
+  // the receiver's root (a sibling of the served dir under tmpRoot).
+  const escapeKinds = [
+    { label: 'a parent-traversal path (..)', kind: 'rel' as const },
+    { label: 'an absolute path', kind: 'abs' as const },
+  ];
 
-    const escapeTarget = path.join(tmpRoot, 'pwned-pull'); // clientRoot/.. = tmpRoot
-    const ws = await WsBrowserClient.connect(client.wsUrl);
-    try {
-      // Receiver = client (start_transfer_with_notify). Must reject, not write outside root.
-      await expect(
-        transfer(ws, 'Pull', 'host-file.txt', '../pwned-pull', entry!),
-      ).rejects.toThrow();
-    } finally {
-      ws.close();
-    }
-    expect(fs.existsSync(escapeTarget)).toBe(false);
-  }, 30_000);
+  it.each(escapeKinds)(
+    'rejects a Pull whose destination escapes the local root via $label',
+    async ({ kind }) => {
+      const entry = (await browseRoot(host.baseUrl)).find((e) => e.name === 'host-file.txt');
+      expect(entry).toBeDefined();
 
-  it('rejects a Push whose destination escapes the remote root', async () => {
-    const entry = (await browseRoot(client.baseUrl)).find((e) => e.name === 'client-file.txt');
-    expect(entry).toBeDefined();
+      const leaf = `pwned-pull-${kind}`;
+      const escapeTarget = path.join(tmpRoot, leaf); // clientRoot/.. = tmpRoot
+      const dest = kind === 'abs' ? escapeTarget : `../${leaf}`;
 
-    const escapeTarget = path.join(tmpRoot, 'pwned-push'); // hostRoot/.. = tmpRoot
-    const ws = await WsBrowserClient.connect(client.wsUrl);
-    try {
-      // Receiver = host (start_transfer). Must reject, not write outside root.
-      await expect(
-        transfer(ws, 'Push', 'client-file.txt', '../pwned-push', entry!),
-      ).rejects.toThrow();
-    } finally {
-      ws.close();
-    }
-    expect(fs.existsSync(escapeTarget)).toBe(false);
-  }, 30_000);
+      const ws = await WsBrowserClient.connect(client.wsUrl);
+      try {
+        // Receiver = client (start_transfer_with_notify). Must reject, not write outside root.
+        await expect(transfer(ws, 'Pull', 'host-file.txt', dest, entry!)).rejects.toThrow();
+      } finally {
+        ws.close();
+      }
+      expect(fs.existsSync(escapeTarget)).toBe(false);
+    },
+    30_000,
+  );
+
+  it.each(escapeKinds)(
+    'rejects a Push whose destination escapes the remote root via $label',
+    async ({ kind }) => {
+      const entry = (await browseRoot(client.baseUrl)).find((e) => e.name === 'client-file.txt');
+      expect(entry).toBeDefined();
+
+      const leaf = `pwned-push-${kind}`;
+      const escapeTarget = path.join(tmpRoot, leaf); // hostRoot/.. = tmpRoot
+      const dest = kind === 'abs' ? escapeTarget : `../${leaf}`;
+
+      const ws = await WsBrowserClient.connect(client.wsUrl);
+      try {
+        // Receiver = host (start_transfer). Must reject, not write outside root.
+        await expect(transfer(ws, 'Push', 'client-file.txt', dest, entry!)).rejects.toThrow();
+      } finally {
+        ws.close();
+      }
+      expect(fs.existsSync(escapeTarget)).toBe(false);
+    },
+    30_000,
+  );
 });
