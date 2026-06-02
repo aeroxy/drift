@@ -18,8 +18,14 @@ pub fn compress_directory(
         return Err(CompressError::NotADirectory);
     }
 
-    // Create .drift temp directory
-    let drift_dir = root_dir.join(".drift");
+    // Stage the .drift temp dir next to the source (under the local pane),
+    // not under root_dir. The root may be read-only (e.g. drift launched from `/`)
+    // even when the source folder is writable. Co-locating .drift with the source
+    // also keeps the staging on the same filesystem as the archive it produces.
+    let parent = source
+        .parent()
+        .ok_or_else(|| CompressError::Io("Source has no parent directory".to_string()))?;
+    let drift_dir = parent.join(".drift");
     std::fs::create_dir_all(&drift_dir)
         .map_err(|e| CompressError::Io(format!("Failed to create .drift dir: {}", e)))?;
 
