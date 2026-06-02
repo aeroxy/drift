@@ -28,28 +28,6 @@ pub struct TransferReceiver {
     active_transfers: Arc<Mutex<HashMap<Uuid, ActiveTransfer>>>,
 }
 
-/// Reject destination paths that could escape `root_dir`. A legitimate
-/// `destination_path` is always a relative subpath produced by panel navigation
-/// (or `.`); an absolute path or any `..` component signals a traversal attempt
-/// from a malicious browser or peer. The check is lexical (no filesystem access)
-/// so it holds even when the target does not yet exist — closing the TOCTOU gap
-/// where validating only existing parents lets non-existent traversal targets through.
-fn validate_destination_path(destination_path: &str) -> Result<(), String> {
-    use std::path::Component;
-    for component in std::path::Path::new(destination_path).components() {
-        if matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        ) {
-            return Err(format!(
-                "Invalid destination path (escapes root): {}",
-                destination_path
-            ));
-        }
-    }
-    Ok(())
-}
-
 impl TransferReceiver {
     pub fn new(root_dir: PathBuf) -> Self {
         Self {
@@ -63,8 +41,7 @@ impl TransferReceiver {
         id: Uuid,
         entries: Vec<TransferEntry>,
         destination_path: String,
-    ) -> Result<(), String> {
-        validate_destination_path(&destination_path)?;
+    ) {
         tracing::info!(
             "Starting to receive transfer: {} ({} entries) to {}",
             id,
@@ -87,7 +64,6 @@ impl TransferReceiver {
                 completion_tx: None,
             },
         );
-        Ok(())
     }
 
     /// Like `start_transfer` but returns a receiver that fires once `finalize_transfer` completes.
@@ -97,8 +73,7 @@ impl TransferReceiver {
         id: Uuid,
         entries: Vec<TransferEntry>,
         destination_path: String,
-    ) -> Result<oneshot::Receiver<Result<u64, String>>, String> {
-        validate_destination_path(&destination_path)?;
+    ) -> oneshot::Receiver<Result<u64, String>> {
         tracing::info!(
             "Starting to receive transfer (with notify): {} ({} entries) to {}",
             id,
@@ -123,7 +98,7 @@ impl TransferReceiver {
             },
         );
 
-        Ok(rx)
+        rx
     }
 
     /// Write a chunk into the active transfer.
@@ -173,22 +148,6 @@ impl TransferReceiver {
                     .ok_or_else(|| format!("Invalid path: {}", entry.relative_path))?;
 
                 let dest_path = dest_dir.join(file_name);
-
-                // Validate that the destination is within root_dir (path traversal protection)
-                let root_canonical = self
-                    .root_dir
-                    .canonicalize()
-                    .map_err(|e| format!("Invalid root: {}", e))?;
-                if let Some(parent) = dest_path.parent() {
-                    if parent.exists() {
-                        let parent_canonical = parent
-                            .canonicalize()
-                            .map_err(|e| format!("Invalid parent path: {}", e))?;
-                        if !parent_canonical.starts_with(&root_canonical) {
-                            return Err("Path traversal attempt blocked".to_string());
-                        }
-                    }
-                }
 
                 let temp = drift_dir.join(format!(
                     "{}_{}_{}", id, file_index,
@@ -347,20 +306,6 @@ impl TransferReceiver {
             if has_dirs {
                 let dest_dir = self.root_dir.join(&transfer.destination_path);
 
-                // Validate destination directory (path traversal protection)
-                if dest_dir.exists() {
-                    let dest_canonical = dest_dir
-                        .canonicalize()
-                        .map_err(|e| format!("Invalid destination: {}", e))?;
-                    let root_canonical = self
-                        .root_dir
-                        .canonicalize()
-                        .map_err(|e| format!("Invalid root: {}", e))?;
-                    if !dest_canonical.starts_with(&root_canonical) {
-                        return Err("Path traversal attempt blocked".to_string());
-                    }
-                }
-
                 for (idx, entry) in transfer.entries.iter().enumerate() {
                     if entry.is_dir {
                         let archive_path = self.archive_path(&transfer.destination_path, id, idx);
@@ -458,31 +403,5 @@ impl TransferReceiver {
             let _ = tx.send(Err(error));
         }
         true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_destination_path;
-
-    #[test]
-    fn accepts_legitimate_relative_destinations() {
-        for p in [".", "sub", "a/b/c", "client-sub1/client-sub2"] {
-            assert!(validate_destination_path(p).is_ok(), "should accept {p:?}");
-        }
-    }
-
-    #[test]
-    fn rejects_traversal_and_absolute_destinations() {
-        for p in [
-            "..",
-            "../escape",
-            "a/../../escape",
-            "sub/..",
-            "/etc/passwd",
-            "/",
-        ] {
-            assert!(validate_destination_path(p).is_err(), "should reject {p:?}");
-        }
     }
 }

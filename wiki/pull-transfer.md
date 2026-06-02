@@ -47,7 +47,7 @@ Browser (Machine A)    Server A            Server B (remote)
 
 The receiver (`transfer_receiver.rs`) stages incoming data in a `.drift/` temp dir under the **destination** directory — `root_dir/<destination_path>/.drift` — not under the served root. This matters when drift is launched from a read-only directory (e.g. `/`): the root may be unwritable while the chosen destination is writable. Co-locating `.drift` with the destination also keeps the temp file on the same filesystem as the final path, so the finalize rename stays atomic (no cross-device `EXDEV`). For the common `destination_path == "."` case this is identical to `root_dir/.drift`. The empty `.drift` dir is removed after a successful finalize.
 
-`destination_path` is validated by `validate_destination_path()` at the receiver entry points (`start_transfer` / `start_transfer_with_notify`) **before any I/O**: an absolute path or any `..` component is rejected with a `TransferError`. This prevents a malicious browser or peer from staging/writing files outside the served root (critical for a password-less server, where any peer can Push).
+`destination_path` is **not validated** — the receiver trusts the peer and writes wherever asked. drift is designed for trusted peers on a monitored network: encryption protects the wire, not the endpoint. A peer reaching a password-less server gets GOD-MODE writes to anywhere its UID can reach. See `wiki/protocol.md` for the rationale.
 
 ## Key Files
 

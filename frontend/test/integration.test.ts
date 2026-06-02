@@ -933,15 +933,15 @@ describe('drift multi-entry transfer', () => {
   }, 180_000);
 });
 
-// ── destination_path staging + validation ─────────────────────────────────────
+// ── destination_path staging ──────────────────────────────────────────────────
 //
-// Feature coverage for the behavior change: the receiver stages its `.drift` temp
-// dir under the *destination* directory (so a read-only served root still works
-// when the destination is writable), removes the empty staging dir after finalize,
-// and rejects any `destination_path` that escapes the served root — both a
-// parent-traversal (`..`) path and an absolute path.
+// Feature coverage: the receiver stages its `.drift` temp dir under the
+// *destination* directory (so a read-only served root still works when the
+// destination is writable) and removes the empty staging dir after finalize.
+// The receiver does NOT validate `destination_path` — drift trusts the peer
+// (GOD MODE), so the previous escape-rejection tests have been removed.
 
-describe('drift destination_path staging and validation', () => {
+describe('drift destination_path staging', () => {
   let hostProc: DriftProcess | null = null;
   let clientProc: DriftProcess | null = null;
   let tmpRoot: string;
@@ -1028,51 +1028,4 @@ describe('drift destination_path staging and validation', () => {
     expect(fs.existsSync(path.join(clientDir, '.drift')), 'no .drift at served root').toBe(false);
     expect(fs.existsSync(stagingDir), '.drift cleaned up under destination').toBe(false);
   }, 60_000);
-
-  // Both validation branches: parent-traversal (`..`) and absolute. For the absolute
-  // case the destination_path is an absolute path to a sibling of the served root.
-  const escapeKinds = [
-    { label: 'a parent-traversal path (..)', kind: 'rel' as const },
-    { label: 'an absolute path', kind: 'abs' as const },
-  ];
-
-  it.each(escapeKinds)(
-    'rejects a Pull whose destination escapes the local root via $label',
-    async ({ kind }) => {
-      const entry = (await browseEntries(hostProc!.baseUrl)).find((e) => e.name === 'doc.txt');
-      expect(entry).toBeDefined();
-      const leaf = `escape-pull-${kind}`;
-      const target = path.join(tmpRoot, leaf); // clientDir/.. = tmpRoot
-      const dest = kind === 'abs' ? target : `../${leaf}`;
-
-      const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
-      try {
-        await expect(sendTransfer(ws, 'Pull', 'doc.txt', dest, entry!)).rejects.toThrow();
-      } finally {
-        ws.close();
-      }
-      expect(fs.existsSync(target), `nothing written to ${target}`).toBe(false);
-    },
-    30_000,
-  );
-
-  it.each(escapeKinds)(
-    'rejects a Push whose destination escapes the remote root via $label',
-    async ({ kind }) => {
-      const entry = (await browseEntries(clientProc!.baseUrl)).find((e) => e.name === 'cdoc.txt');
-      expect(entry).toBeDefined();
-      const leaf = `escape-push-${kind}`;
-      const target = path.join(tmpRoot, leaf); // hostDir/.. = tmpRoot
-      const dest = kind === 'abs' ? target : `../${leaf}`;
-
-      const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
-      try {
-        await expect(sendTransfer(ws, 'Push', 'cdoc.txt', dest, entry!)).rejects.toThrow();
-      } finally {
-        ws.close();
-      }
-      expect(fs.existsSync(target), `nothing written to ${target}`).toBe(false);
-    },
-    30_000,
-  );
 });
