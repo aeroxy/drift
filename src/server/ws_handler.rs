@@ -689,7 +689,7 @@ async fn handle_server_to_server_request(
                     );
                     state
                         .transfer_receiver
-                        .start_transfer(id, entries.clone(), destination_path)
+                        .start_transfer(id, entries, destination_path)
                         .await;
                     Some(ControlMessage::TransferAccepted {
                         id,

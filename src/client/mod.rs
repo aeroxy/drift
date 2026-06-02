@@ -579,7 +579,7 @@ async fn handle_incoming_request(
                 Direction::Push => {
                     state
                         .transfer_receiver
-                        .start_transfer(id, entries.clone(), destination_path)
+                        .start_transfer(id, entries, destination_path)
                         .await;
                     Some(ControlMessage::TransferAccepted {
                         id,
