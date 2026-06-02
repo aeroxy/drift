@@ -687,13 +687,10 @@ async fn handle_server_to_server_request(
                         "Accepting push transfer, preparing to receive {} files",
                         entries.len()
                     );
-                    if let Err(e) = state
+                    state
                         .transfer_receiver
                         .start_transfer(id, entries.clone(), destination_path)
-                        .await
-                    {
-                        return Some(ControlMessage::TransferError { id, error: e });
-                    }
+                        .await;
                     Some(ControlMessage::TransferAccepted {
                         id,
                         resume_offsets: std::collections::HashMap::new(),
