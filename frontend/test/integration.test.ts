@@ -1028,4 +1028,36 @@ describe('drift destination_path staging', () => {
     expect(fs.existsSync(path.join(clientDir, '.drift')), 'no .drift at served root').toBe(false);
     expect(fs.existsSync(stagingDir), '.drift cleaned up under destination').toBe(false);
   }, 60_000);
+
+  // Regression for the destination-validation revert: a Pull with an absolute
+  // destination that lives OUTSIDE the served root must land there. Stages
+  // under that absolute destination, never under the served root.
+  it('pulls a folder to an absolute destination outside the served root (GOD MODE)', async () => {
+    const entry = (await browseEntries(hostProc!.baseUrl)).find((e) => e.name === 'pkg');
+    expect(entry, 'host should expose pkg/').toBeDefined();
+
+    const escapeTarget = path.join(tmpRoot, 'escape-target');
+    fs.mkdirSync(escapeTarget, { recursive: true });
+
+    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+    try {
+      await sendTransfer(ws, 'Pull', 'pkg', escapeTarget, entry!);
+    } finally {
+      ws.close();
+    }
+
+    const innerPath = path.join(escapeTarget, 'pkg', 'nested', 'inner.txt');
+    const stagingDir = path.join(escapeTarget, '.drift');
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(innerPath) && !fs.existsSync(stagingDir)) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    // Files landed at the escape destination, not anywhere under the served root.
+    expect(fs.readFileSync(innerPath, 'utf-8')).toBe('inner-body');
+    expect(fs.existsSync(path.join(clientDir, 'pkg')), 'no pkg/ under served root').toBe(false);
+    // Staging happened under the escape destination, not the served root, and was cleaned up.
+    expect(fs.existsSync(path.join(clientDir, '.drift')), 'no .drift at served root').toBe(false);
+    expect(fs.existsSync(stagingDir), '.drift cleaned up under escape destination').toBe(false);
+  }, 60_000);
 });
