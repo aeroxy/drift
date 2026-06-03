@@ -73,11 +73,13 @@ pub fn compress_directory(
         None
     };
 
-    // If we couldn't create/write there, fallback to system temp dir
+    // If we couldn't create/write there, fallback to system temp dir with a unique subdirectory
     let file = if let Some(f) = file {
         f
     } else {
-        drift_dir = std::env::temp_dir().join(".drift");
+        drift_dir = std::env::temp_dir()
+            .join(".drift")
+            .join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&drift_dir)
             .map_err(|e| CompressError::Io(format!("Failed to create fallback temp dir: {}", e)))?;
         archive_path = drift_dir.join(&archive_name);
@@ -131,10 +133,13 @@ pub fn cleanup_archive(path: &Path) {
         tracing::warn!("Failed to clean up archive {}: {}", path.display(), e);
     }
     
-    // Best-effort cleanup of the .drift directory itself
+    // Best-effort cleanup of the parent directory and its parent if it is ".drift"
     if let Some(parent) = path.parent() {
-        if parent.file_name().and_then(|s| s.to_str()) == Some(".drift") {
-            let _ = std::fs::remove_dir(parent); // Only succeeds if directory is empty
+        let _ = std::fs::remove_dir(parent); // Only succeeds if directory is empty
+        if let Some(grandparent) = parent.parent() {
+            if grandparent.file_name().and_then(|s| s.to_str()) == Some(".drift") {
+                let _ = std::fs::remove_dir(grandparent); // Only succeeds if directory is empty
+            }
         }
     }
 }
