@@ -58,9 +58,9 @@ pub fn compress_directory(
     // If the source is read-only (e.g., `/` on macOS), fallback to the OS temp dir.
     let mut drift_dir = source.join(".drift");
     
-    // Edge case: if relative_path is empty/root, the name would just be ".tar.gz"
+    // Edge case: if relative_path is empty/root, the name would just be ".tar.gz" or "..tar.gz"
     let mut archive_name = format!("{}.tar.gz", relative_path.replace(['/', '\\'], "_"));
-    if archive_name == ".tar.gz" {
+    if archive_name == ".tar.gz" || archive_name == "..tar.gz" {
         archive_name = "root.tar.gz".to_string();
     }
     
