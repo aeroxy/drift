@@ -155,13 +155,11 @@ pub fn cleanup_archive(path: &Path) {
         tracing::warn!("Failed to clean up archive {}: {}", path.display(), e);
     }
     
-    // Best-effort cleanup of the parent directory and its parent if it is ".drift"
+    // Best-effort cleanup of the parent directory (the staging folder)
     if let Some(parent) = path.parent() {
-        let _ = std::fs::remove_dir(parent); // Only succeeds if directory is empty
-        if let Some(grandparent) = parent.parent() {
-            if grandparent.file_name().and_then(|s| s.to_str()) == Some(".drift") {
-                let _ = std::fs::remove_dir(grandparent); // Only succeeds if directory is empty
-            }
+        let name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name == ".drift" || name.starts_with(".drift-") {
+            let _ = std::fs::remove_dir(parent); // Only succeeds if directory is empty
         }
     }
 }
