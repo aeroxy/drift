@@ -53,23 +53,36 @@ pub fn compress_directory(
         return Err(CompressError::NotADirectory);
     }
 
-    // Stage the .drift temp dir next to the source (under the local pane),
-    // not under root_dir. The root may be read-only (e.g. drift launched from `/`)
-    // even when the source folder is writable. Co-locating .drift with the source
-    // also keeps the staging on the same filesystem as the archive it produces.
-    let parent = source
-        .parent()
-        .ok_or_else(|| CompressError::Io("Source has no parent directory".to_string()))?;
-    let drift_dir = parent.join(".drift");
-    std::fs::create_dir_all(&drift_dir)
-        .map_err(|e| CompressError::Io(format!("Failed to create .drift dir: {}", e)))?;
+    // Stage the .drift temp dir inside the source directory to keep it contained.
+    // If the source is read-only (e.g., `/` on macOS), fallback to the OS temp dir.
+    let mut drift_dir = source.join(".drift");
+    
+    // Edge case: if relative_path is empty/root, the name would just be ".tar.gz"
+    let mut archive_name = format!("{}.tar.gz", relative_path.replace('/', "_"));
+    if archive_name == ".tar.gz" {
+        archive_name = "root.tar.gz".to_string();
+    }
+    
+    let mut archive_path = drift_dir.join(&archive_name);
+    
+    // Try to create in source/.drift/ and open the file
+    let file = if std::fs::create_dir_all(&drift_dir).is_ok() {
+        std::fs::File::create(&archive_path).ok()
+    } else {
+        None
+    };
 
-    // Create archive file
-    let archive_name = format!("{}.tar.gz", relative_path.replace('/', "_"));
-    let archive_path = drift_dir.join(&archive_name);
-
-    let file = std::fs::File::create(&archive_path)
-        .map_err(|e| CompressError::Io(format!("Failed to create archive: {}", e)))?;
+    // If we couldn't create/write there, fallback to system temp dir
+    let file = if let Some(f) = file {
+        f
+    } else {
+        drift_dir = std::env::temp_dir().join(".drift");
+        std::fs::create_dir_all(&drift_dir)
+            .map_err(|e| CompressError::Io(format!("Failed to create fallback temp dir: {}", e)))?;
+        archive_path = drift_dir.join(&archive_name);
+        std::fs::File::create(&archive_path)
+            .map_err(|e| CompressError::Io(format!("Failed to create archive: {}", e)))?
+    };
 
     let encoder = GzEncoder::new(file, Compression::fast());
     let mut archive = Builder::new(encoder);
@@ -111,10 +124,17 @@ pub fn compress_directory(
     Ok((archive_path, size))
 }
 
-/// Clean up a temp archive file
+/// Clean up a temp archive file and its parent .drift directory if empty
 pub fn cleanup_archive(path: &Path) {
     if let Err(e) = std::fs::remove_file(path) {
         tracing::warn!("Failed to clean up archive {}: {}", path.display(), e);
+    }
+    
+    // Best-effort cleanup of the .drift directory itself
+    if let Some(parent) = path.parent() {
+        if parent.file_name().and_then(|s| s.to_str()) == Some(".drift") {
+            let _ = std::fs::remove_dir(parent); // Only succeeds if directory is empty
+        }
     }
 }
 
