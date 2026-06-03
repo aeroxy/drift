@@ -3,6 +3,33 @@ use flate2::write::GzEncoder;
 use std::path::{Path, PathBuf};
 use tar::Builder;
 
+fn append_dir_all_excluding(
+    archive: &mut Builder<GzEncoder<std::fs::File>>,
+    base_prefix: &Path,
+    source: &Path,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let file_name = entry.file_name();
+
+        if file_name == ".drift" {
+            continue;
+        }
+
+        let path = entry.path();
+        let archive_path = base_prefix.join(&file_name);
+
+        if file_type.is_dir() {
+            archive.append_dir(&archive_path, &path)?;
+            append_dir_all_excluding(archive, &archive_path, &path)?;
+        } else {
+            archive.append_path_with_name(&path, &archive_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Compress a directory into a .tar.gz file inside the .drift temp directory.
 /// Returns (archive_path, archive_size).
 pub fn compress_directory(
@@ -13,6 +40,14 @@ pub fn compress_directory(
     let source = source
         .canonicalize()
         .map_err(|e| CompressError::Io(format!("Failed to resolve path: {}", e)))?;
+
+    let root_canonical = root_dir
+        .canonicalize()
+        .map_err(|e| CompressError::Io(format!("Failed to resolve root_dir: {}", e)))?;
+
+    if !source.starts_with(&root_canonical) {
+        return Err(CompressError::Io("Path traversal attempt blocked".to_string()));
+    }
 
     if !source.is_dir() {
         return Err(CompressError::NotADirectory);
@@ -44,9 +79,14 @@ pub fn compress_directory(
     let dir_name = source
         .file_name()
         .ok_or_else(|| CompressError::Io("Invalid directory path".to_string()))?;
+    
+    let base_prefix = Path::new(dir_name);
     archive
-        .append_dir_all(dir_name, &source)
+        .append_dir(base_prefix, &source)
         .map_err(|e| CompressError::Io(format!("Failed to archive directory: {}", e)))?;
+    
+    append_dir_all_excluding(&mut archive, base_prefix, &source)
+        .map_err(|e| CompressError::Io(format!("Failed to archive directory contents: {}", e)))?;
 
     // Finalize
     let encoder = archive
