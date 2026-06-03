@@ -86,7 +86,7 @@ cd frontend && bun dev
 - Protocol messages: serde tagged enum `ControlMessage` with `#[serde(tag = "type")]`
 - Binary frames: `[16-byte UUID][8-byte BE offset][chunk data]`
 - Encryption: encrypt-then-MAC via ChaCha20-Poly1305 AEAD, monotonic nonce counters
-- Path safety: browse paths are canonicalized and checked against root dir before any I/O. **Transfer `destination_path` is NOT validated** — the receiver trusts the peer and writes wherever asked. drift is designed for trusted peers on a monitored network (encryption protects the wire, not the endpoint); peers are trusted, the network is not. A peer with no password set is open to anyone who can reach the port, so the operator is expected to know that anyone reaching a password-less server gets GOD-MODE writes. See `wiki/protocol.md` for the trade-off rationale.
+- Path safety: browse paths are canonicalized and checked against root dir before any I/O. **Transfer `destination_path` is NOT validated** — the receiver trusts the peer and writes wherever asked. See the **Trust Model** in [wiki/protocol.md](wiki/protocol.md) for the rationale (trusted peers on a monitored network; encryption protects the wire, not the endpoint).
 - Folder transfers: compressed to tar.gz in `.drift/` temp dir, decompressed on receiver
 - Receiver temp staging lives under the **destination** dir (`root_dir/<destination_path>/.drift`), not the served root — so a read-only root (e.g. drift launched from `/`) still works when the destination is writable, and finalize renames stay on one filesystem
 - `.drift/` directory is hidden from the web panel browse listing

@@ -56,7 +56,7 @@ Server A waits for `TransferFinalized` from Server B before forwarding `Transfer
 
 Server B (`transfer_receiver.rs`) stages incoming data in a `.drift/` temp dir under the **destination** directory — `root_dir/<destination_path>/.drift` — not under the served root. This keeps staging writable when the served root is read-only but the destination is writable, and keeps the temp file on the same filesystem as the final path so the finalize rename stays atomic (no cross-device `EXDEV`). For `destination_path == "."` this is identical to `root_dir/.drift`. The empty `.drift` dir is removed after a successful finalize.
 
-`destination_path` is **not validated** — the receiver trusts the peer and writes wherever asked. drift is designed for trusted peers on a monitored network: encryption protects the wire, not the endpoint. A peer reaching a password-less server gets GOD-MODE writes to anywhere its UID can reach. See `wiki/protocol.md` for the rationale.
+`destination_path` is **not validated** — the receiver trusts the peer and writes wherever asked. See the **Trust Model** in [wiki/protocol.md](wiki/protocol.md) for the rationale.
 
 ## Key Files
 

@@ -165,7 +165,7 @@ Request/response control messages such as browse and info use correlation IDs so
 ### Security
 
 - **Forward secrecy**: ephemeral X25519 keys per session
-- **Path traversal protection**: browse paths are canonicalized and validated against the root directory. Transfer destinations are NOT validated — the receiver trusts the peer (see [wiki/push-transfer.md](wiki/push-transfer.md) for the trust model: drift is for trusted peers on a monitored network, encryption protects the wire not the endpoint)
+- **Path traversal protection**: browse paths are canonicalized and validated against the root directory. Transfer destinations are NOT validated — the receiver trusts the peer (see the **Trust Model** in [wiki/protocol.md](wiki/protocol.md) for the rationale: drift is for trusted peers on a monitored network, encryption protects the wire not the endpoint)
 - **Authenticated encryption**: ChaCha20-Poly1305 with monotonic nonce counters
 
 ## CLI Reference
