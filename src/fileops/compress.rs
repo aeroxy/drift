@@ -88,8 +88,13 @@ pub fn compress_directory(
         std::fs::create_dir_all(&drift_dir)
             .map_err(|e| CompressError::Io(format!("Failed to create fallback temp dir: {}", e)))?;
         archive_path = drift_dir.join(&archive_name);
-        std::fs::File::create(&archive_path)
-            .map_err(|e| CompressError::Io(format!("Failed to create archive: {}", e)))?
+        match std::fs::File::create(&archive_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = std::fs::remove_dir(&drift_dir);
+                return Err(CompressError::Io(format!("Failed to create archive: {}", e)));
+            }
+        }
     };
 
     struct CleanupGuard {
@@ -152,7 +157,9 @@ pub fn compress_directory(
 /// Clean up a temp archive file and its parent .drift directory if empty
 pub fn cleanup_archive(path: &Path) {
     if let Err(e) = std::fs::remove_file(path) {
-        tracing::warn!("Failed to clean up archive {}: {}", path.display(), e);
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("Failed to clean up archive {}: {}", path.display(), e);
+        }
     }
     
     // Best-effort cleanup of the parent directory (the staging folder)
