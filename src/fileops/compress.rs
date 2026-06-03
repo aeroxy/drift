@@ -7,22 +7,23 @@ fn append_dir_all_excluding(
     archive: &mut Builder<GzEncoder<std::fs::File>>,
     base_prefix: &Path,
     source: &Path,
+    drift_dir_to_exclude: &Path,
 ) -> std::io::Result<()> {
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
-        let file_name = entry.file_name();
+        let path = entry.path();
 
-        if file_name == ".drift" {
+        if path == drift_dir_to_exclude {
             continue;
         }
 
-        let path = entry.path();
+        let file_name = entry.file_name();
         let archive_path = base_prefix.join(&file_name);
 
         if file_type.is_dir() {
             archive.append_dir(&archive_path, &path)?;
-            append_dir_all_excluding(archive, &archive_path, &path)?;
+            append_dir_all_excluding(archive, &archive_path, &path, drift_dir_to_exclude)?;
         } else {
             archive.append_path_with_name(&path, &archive_path)?;
         }
@@ -98,7 +99,7 @@ pub fn compress_directory(
         .append_dir(base_prefix, &source)
         .map_err(|e| CompressError::Io(format!("Failed to archive directory: {}", e)))?;
     
-    append_dir_all_excluding(&mut archive, base_prefix, &source)
+    append_dir_all_excluding(&mut archive, base_prefix, &source, &drift_dir)
         .map_err(|e| CompressError::Io(format!("Failed to archive directory contents: {}", e)))?;
 
     // Finalize
