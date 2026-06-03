@@ -122,7 +122,7 @@ pub fn compress_directory(
         .append_dir(base_prefix, &source)
         .map_err(|e| CompressError::Io(format!("Failed to archive directory: {}", e)))?;
     
-    append_dir_all_excluding(&mut archive, base_prefix, &source, &drift_dir)
+    append_dir_all_excluding(&mut archive, base_prefix, &source, &source.join(".drift"))
         .map_err(|e| CompressError::Io(format!("Failed to archive directory contents: {}", e)))?;
 
     // Finalize
