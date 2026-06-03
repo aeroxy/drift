@@ -115,3 +115,13 @@ For legacy v2 peers that do not echo `request_id`, responses fall back to FIFO d
 | `/api/disconnect`   | POST   | —                                 | Tear down current connection **and** forget stored credentials |
 
 `can_reconnect` is `true` when there is no live connection but the server still remembers a target (CLI-initiated startup or a prior successful `/api/connect`). The FE renders a "Reconnect" button when this flag is set. `last_target` is the bare target string for display; the password is never returned.
+
+## Trust Model
+
+drift is designed for **trusted peers on a monitored network**. It assumes that if a peer can connect to your drift port and (optionally) provides the correct password, they are authorized to perform any operation the drift process UID can perform.
+
+- **Wire security**: Encryption (X25519 + ChaCha20-Poly1305) protects the data in transit from observers on the network.
+- **Endpoint trust**: Encryption protects the *wire*, not the *endpoint*. The receiver trusts the sender's `destination_path` and `TransferEntry` attributes. 
+- **GOD MODE**: A peer can write to any path the drift process has permissions to reach (including absolute paths outside the served root). This is by design to allow maximum flexibility between trusted machines.
+- **Password-less mode**: If no `--password` is set, anyone who can reach the network port is considered a trusted peer with full write access.
+

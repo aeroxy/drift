@@ -1006,15 +1006,15 @@ describe('drift destination_path staging', () => {
   it('pulls a folder into a destination subdir and stages .drift under it (not the root)', async () => {
     const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
     
-    // Browse into 'outer' to find 'pkg'
-    const browseId = crypto.randomUUID();
-    const browseDone = ws.waitForMessage((m) => m.type === 'BrowseResponse' && m.request_id === browseId, 5000);
-    ws.send({ type: 'BrowseRequest', request_id: browseId, path: 'outer' });
-    const browseResp = (await browseDone) as any;
-    const entry = browseResp.entries.find((e) => e.name === 'pkg');
-    expect(entry, 'host should expose pkg/ inside outer/').toBeDefined();
-
     try {
+      // Browse into 'outer' to find 'pkg'
+      const browseId = crypto.randomUUID();
+      const browseDone = ws.waitForMessage((m) => m.type === 'BrowseResponse' && m.request_id === browseId, 5000);
+      ws.send({ type: 'BrowseRequest', request_id: browseId, path: 'outer' });
+      const browseResp = (await browseDone) as any;
+      const entry = browseResp.entries.find((e) => e.name === 'pkg');
+      expect(entry, 'host should expose pkg/ inside outer/').toBeDefined();
+
       await sendTransfer(ws, 'Pull', 'outer/pkg', 'sub', entry!);
     } finally {
       ws.close();
@@ -1045,34 +1045,69 @@ describe('drift destination_path staging', () => {
   it('pulls a folder to an absolute destination outside the served root (GOD MODE)', async () => {
     const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
     
-    const browseId = crypto.randomUUID();
-    const browseDone = ws.waitForMessage((m) => m.type === 'BrowseResponse' && m.request_id === browseId, 5000);
-    ws.send({ type: 'BrowseRequest', request_id: browseId, path: 'outer' });
-    const browseResp = (await browseDone) as any;
-    const entry = browseResp.entries.find((e) => e.name === 'pkg');
-    expect(entry, 'host should expose pkg/ inside outer/').toBeDefined();
+    try {
+      const browseId = crypto.randomUUID();
+      const browseDone = ws.waitForMessage((m) => m.type === 'BrowseResponse' && m.request_id === browseId, 5000);
+      ws.send({ type: 'BrowseRequest', request_id: browseId, path: 'outer' });
+      const browseResp = (await browseDone) as any;
+      const entry = browseResp.entries.find((e) => e.name === 'pkg');
+      expect(entry, 'host should expose pkg/ inside outer/').toBeDefined();
 
-    const escapeTarget = path.join(tmpRoot, 'escape-target');
+      const escapeTarget = path.join(tmpRoot, 'escape-target');
+      fs.mkdirSync(escapeTarget, { recursive: true });
+
+      await sendTransfer(ws, 'Pull', 'outer/pkg', escapeTarget, entry!);
+
+      const innerPath = path.join(escapeTarget, 'pkg', 'nested', 'inner.txt');
+      const stagingDir = path.join(escapeTarget, '.drift');
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        if (fs.existsSync(innerPath) && !fs.existsSync(stagingDir)) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      // Files landed at the escape destination, not anywhere under the served root.
+      expect(fs.readFileSync(innerPath, 'utf-8')).toBe('inner-body');
+      expect(fs.existsSync(path.join(clientDir, 'pkg')), 'no pkg/ under served root').toBe(false);
+      // Staging happened under the escape destination, not the served root, and was cleaned up.
+      expect(fs.existsSync(path.join(clientDir, '.drift')), 'no .drift at served root').toBe(false);
+      expect(fs.existsSync(stagingDir), '.drift cleaned up under escape destination').toBe(false);
+    } finally {
+      ws.close();
+    }
+  }, 60_000);
+
+  // Regression: verify Push direction also supports trusted destination_path (GOD MODE)
+  // Exercises start_transfer (ws_handler) using the browser client.
+  it('pushes a file to an absolute destination outside the remote root (GOD MODE)', async () => {
+    const entry = { name: 'cdoc.txt', size: 9, is_dir: false, permissions: 0o644 };
+    const escapeTarget = path.join(tmpRoot, 'push-escape-target');
     fs.mkdirSync(escapeTarget, { recursive: true });
 
+    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
     try {
-      await sendTransfer(ws, 'Pull', 'outer/pkg', escapeTarget, entry!);
+      const id = crypto.randomUUID();
+      const done = ws.waitForTransferComplete(id, 60_000);
+      ws.send({
+        type: 'TransferRequest',
+        id,
+        entries: [{
+          relative_path: 'cdoc.txt',
+          size: entry.size,
+          is_dir: entry.is_dir,
+          permissions: entry.permissions,
+        }],
+        direction: 'Push',
+        destination_path: escapeTarget,
+      });
+      await done;
     } finally {
       ws.close();
     }
 
-    const innerPath = path.join(escapeTarget, 'pkg', 'nested', 'inner.txt');
-    const stagingDir = path.join(escapeTarget, '.drift');
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      if (fs.existsSync(innerPath) && !fs.existsSync(stagingDir)) break;
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    // Files landed at the escape destination, not anywhere under the served root.
-    expect(fs.readFileSync(innerPath, 'utf-8')).toBe('inner-body');
-    expect(fs.existsSync(path.join(clientDir, 'pkg')), 'no pkg/ under served root').toBe(false);
-    // Staging happened under the escape destination, not the served root, and was cleaned up.
-    expect(fs.existsSync(path.join(clientDir, '.drift')), 'no .drift at served root').toBe(false);
-    expect(fs.existsSync(stagingDir), '.drift cleaned up under escape destination').toBe(false);
+    const finalPath = path.join(escapeTarget, 'cdoc.txt');
+    expect(fs.readFileSync(finalPath, 'utf-8')).toBe('cdoc-body');
+    // Staging occurred under destination, not remote root
+    expect(fs.existsSync(path.join(hostDir, '.drift')), 'no .drift at remote root').toBe(false);
+    expect(fs.existsSync(path.join(escapeTarget, '.drift')), 'no leftover staging dir').toBe(false);
   }, 60_000);
 });
