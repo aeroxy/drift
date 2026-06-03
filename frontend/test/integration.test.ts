@@ -953,9 +953,11 @@ describe('drift destination_path staging', () => {
     hostDir = path.join(tmpRoot, 'host');
     clientDir = path.join(tmpRoot, 'client');
     // Host (remote) holds a folder + file to pull; client holds a file to push.
-    fs.mkdirSync(path.join(hostDir, 'pkg', 'nested'), { recursive: true });
+    // We nest pkg under 'outer' so its parent is not hostDir, verifying sender-side staging
+    // uses the parent directory rather than the served root.
+    fs.mkdirSync(path.join(hostDir, 'outer', 'pkg', 'nested'), { recursive: true });
     fs.writeFileSync(path.join(hostDir, 'doc.txt'), 'doc-body');
-    fs.writeFileSync(path.join(hostDir, 'pkg', 'nested', 'inner.txt'), 'inner-body');
+    fs.writeFileSync(path.join(hostDir, 'outer', 'pkg', 'nested', 'inner.txt'), 'inner-body');
     fs.mkdirSync(clientDir, { recursive: true });
     fs.writeFileSync(path.join(clientDir, 'cdoc.txt'), 'cdoc-body');
 
@@ -1002,12 +1004,18 @@ describe('drift destination_path staging', () => {
   }
 
   it('pulls a folder into a destination subdir and stages .drift under it (not the root)', async () => {
-    const entry = (await browseEntries(hostProc!.baseUrl)).find((e) => e.name === 'pkg');
-    expect(entry, 'host should expose pkg/').toBeDefined();
-
     const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+    
+    // Browse into 'outer' to find 'pkg'
+    const browseId = crypto.randomUUID();
+    const browseDone = ws.waitForMessage((m) => m.type === 'BrowseResponse' && m.request_id === browseId, 5000);
+    ws.send({ type: 'BrowseRequest', request_id: browseId, path: 'outer' });
+    const browseResp = (await browseDone) as any;
+    const entry = browseResp.entries.find((e) => e.name === 'pkg');
+    expect(entry, 'host should expose pkg/ inside outer/').toBeDefined();
+
     try {
-      await sendTransfer(ws, 'Pull', 'pkg', 'sub', entry!);
+      await sendTransfer(ws, 'Pull', 'outer/pkg', 'sub', entry!);
     } finally {
       ws.close();
     }
@@ -1027,21 +1035,28 @@ describe('drift destination_path staging', () => {
     // Staging happened under the destination, not the served root, and was cleaned up.
     expect(fs.existsSync(path.join(clientDir, '.drift')), 'no .drift at served root').toBe(false);
     expect(fs.existsSync(stagingDir), '.drift cleaned up under destination').toBe(false);
+    // Verify sender-side staging did not use the served root
+    expect(fs.existsSync(path.join(hostDir, '.drift')), 'sender staging avoided hostDir').toBe(false);
   }, 60_000);
 
   // Regression for the destination-validation revert: a Pull with an absolute
   // destination that lives OUTSIDE the served root must land there. Stages
   // under that absolute destination, never under the served root.
   it('pulls a folder to an absolute destination outside the served root (GOD MODE)', async () => {
-    const entry = (await browseEntries(hostProc!.baseUrl)).find((e) => e.name === 'pkg');
-    expect(entry, 'host should expose pkg/').toBeDefined();
+    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+    
+    const browseId = crypto.randomUUID();
+    const browseDone = ws.waitForMessage((m) => m.type === 'BrowseResponse' && m.request_id === browseId, 5000);
+    ws.send({ type: 'BrowseRequest', request_id: browseId, path: 'outer' });
+    const browseResp = (await browseDone) as any;
+    const entry = browseResp.entries.find((e) => e.name === 'pkg');
+    expect(entry, 'host should expose pkg/ inside outer/').toBeDefined();
 
     const escapeTarget = path.join(tmpRoot, 'escape-target');
     fs.mkdirSync(escapeTarget, { recursive: true });
 
-    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
     try {
-      await sendTransfer(ws, 'Pull', 'pkg', escapeTarget, entry!);
+      await sendTransfer(ws, 'Pull', 'outer/pkg', escapeTarget, entry!);
     } finally {
       ws.close();
     }
