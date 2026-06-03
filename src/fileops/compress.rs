@@ -68,7 +68,12 @@ pub fn compress_directory(
     
     // Try to create in source/.drift/ and open the file
     let file = if std::fs::create_dir_all(&drift_dir).is_ok() {
-        std::fs::File::create(&archive_path).ok()
+        if let Ok(f) = std::fs::File::create(&archive_path) {
+            Some(f)
+        } else {
+            let _ = std::fs::remove_dir(&drift_dir);
+            None
+        }
     } else {
         None
     };
