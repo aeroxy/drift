@@ -87,6 +87,22 @@ pub fn compress_directory(
             .map_err(|e| CompressError::Io(format!("Failed to create archive: {}", e)))?
     };
 
+    struct CleanupGuard {
+        path: PathBuf,
+        active: bool,
+    }
+    impl Drop for CleanupGuard {
+        fn drop(&mut self) {
+            if self.active {
+                cleanup_archive(&self.path);
+            }
+        }
+    }
+    let mut cleanup_guard = CleanupGuard {
+        path: archive_path.clone(),
+        active: true,
+    };
+
     let encoder = GzEncoder::new(file, Compression::fast());
     let mut archive = Builder::new(encoder);
 
@@ -124,6 +140,7 @@ pub fn compress_directory(
         size
     );
 
+    cleanup_guard.active = false;
     Ok((archive_path, size))
 }
 
