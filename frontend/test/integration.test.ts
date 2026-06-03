@@ -976,7 +976,15 @@ describe('drift destination_path staging', () => {
 
   afterAll(async () => {
     await Promise.all([hostProc?.stop(), clientProc?.stop()]);
-    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    // Ensure all directories in tmpRoot are writable before deletion
+    // (In case a test set a folder to read-only and failed to restore it)
+    const { execSync } = await import('child_process');
+    try {
+      execSync(`chmod -R 777 ${tmpRoot}`);
+      execSync(`rm -rf ${tmpRoot}`);
+    } catch (e) {
+      // ignore
+    }
   }, 30_000);
 
   function sendTransfer(
@@ -1109,5 +1117,126 @@ describe('drift destination_path staging', () => {
     // Staging occurred under destination, not remote root
     expect(fs.existsSync(path.join(hostDir, '.drift')), 'no .drift at remote root').toBe(false);
     expect(fs.existsSync(path.join(escapeTarget, '.drift')), 'no leftover staging dir').toBe(false);
+  }, 60_000);
+
+  // ── sender-side staging and preservation (edge cases) ─────────────────────────
+
+  it('preserves nested user data named .drift (not the staging dir)', async () => {
+    // Create nested .drift data that should NOT be excluded
+    const nestedDriftDir = path.join(hostDir, 'outer', 'pkg', 'user-data', '.drift');
+    fs.mkdirSync(nestedDriftDir, { recursive: true });
+    fs.writeFileSync(path.join(nestedDriftDir, 'secret.txt'), 'user-secret');
+
+    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+    try {
+      // Find the pkg entry again (inside outer/)
+      const browseId = crypto.randomUUID();
+      const browseDone = ws.waitForMessage((m) => m.type === 'BrowseResponse' && m.request_id === browseId, 5000);
+      ws.send({ type: 'BrowseRequest', request_id: browseId, path: 'outer' });
+      const browseResp = (await browseDone) as any;
+      const entry = browseResp.entries.find((e: any) => e.name === 'pkg');
+      
+      await sendTransfer(ws, 'Pull', 'outer/pkg', 'nested-data-test', entry!);
+    } finally {
+      ws.close();
+    }
+
+    const secretPath = path.join(clientDir, 'nested-data-test', 'pkg', 'user-data', '.drift', 'secret.txt');
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(secretPath)) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    
+    expect(fs.readFileSync(secretPath, 'utf-8')).toBe('user-secret');
+  }, 60_000);
+
+  it('handles root transfer (.) successfully (naming and exclusion)', async () => {
+    // Pull the entire host root (.)
+    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+    try {
+      const entry = { name: '.', size: 0, is_dir: true, permissions: 0o755 };
+      await sendTransfer(ws, 'Pull', '.', 'root-test', entry as any);
+    } finally {
+      ws.close();
+    }
+
+    // Verify a file from the host root materialized
+    // Note: the archive prefix is the directory name itself ('host')
+    const hostBase = path.basename(hostDir);
+    const docPath = path.join(clientDir, 'root-test', hostBase, 'doc.txt');
+    const stagingDir = path.join(clientDir, 'root-test', hostBase, '.drift');
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(docPath) && !fs.existsSync(stagingDir)) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    expect(fs.readFileSync(docPath, 'utf-8')).toBe('doc-body');
+    // Verify root's staging dir was NOT included in the archive
+    expect(fs.existsSync(stagingDir), 'staging dir not archived').toBe(false);
+  }, 60_000);
+
+  it('falls back to system temp dir when source is read-only', async () => {
+    // Make outer/pkg read-only so .drift cannot be created inside it
+    const targetDir = path.join(hostDir, 'outer', 'pkg');
+    fs.chmodSync(targetDir, 0o555);
+    
+    try {
+      const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+      try {
+        const entry = { name: 'pkg', size: 0, is_dir: true, permissions: 0o755 };
+        await sendTransfer(ws, 'Pull', 'outer/pkg', 'readonly-test', entry as any);
+      } finally {
+        ws.close();
+      }
+
+      const innerPath = path.join(clientDir, 'readonly-test', 'pkg', 'nested', 'inner.txt');
+      const stagingDirAtDest = path.join(clientDir, 'readonly-test', '.drift');
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        if (fs.existsSync(innerPath) && !fs.existsSync(stagingDirAtDest)) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      expect(fs.readFileSync(innerPath, 'utf-8')).toBe('inner-body');
+      // Verify NO .drift was created in the read-only folder
+      expect(fs.existsSync(path.join(targetDir, '.drift')), 'no .drift in readonly source').toBe(false);
+    } finally {
+      // Restore permissions for cleanup
+      fs.chmodSync(targetDir, 0o755);
+    }
+  }, 60_000);
+
+  it('cleans up partial state on failure via RAII guard', async () => {
+    const ws = await WsBrowserClient.connect(clientProc!.wsUrl);
+    
+    try {
+      const entry = { name: 'pkg', size: 1000000, is_dir: true, permissions: 0o755 };
+      const id = crypto.randomUUID();
+      
+      // Send a request for a non-existent folder to trigger a compression error
+      ws.send({
+        type: 'TransferRequest',
+        id,
+        entries: [{
+          relative_path: 'outer/NON_EXISTENT_FOLDER',
+          size: 0,
+          is_dir: true,
+          permissions: 0o755,
+        }],
+        direction: 'Pull',
+        destination_path: 'fail-test',
+      });
+
+      // Wait for the error
+      await ws.waitForMessage((m) => m.type === 'TransferError' && m.id === id, 5000);
+      
+      // Verify NO .drift directory is left behind in outer/
+      // (The error should have triggered the RAII guard)
+      expect(fs.existsSync(path.join(hostDir, 'outer', '.drift')), 'no leftover .drift on failure').toBe(false);
+    } finally {
+      ws.close();
+    }
   }, 60_000);
 });
