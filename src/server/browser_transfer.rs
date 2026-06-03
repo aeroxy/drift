@@ -45,6 +45,19 @@ fn validate_path(root_dir: &Path, relative_path: &str) -> Result<PathBuf, String
     }
 }
 
+async fn abort_browser_transfer(
+    state: &AppState,
+    ws_tx: &mpsc::UnboundedSender<Message>,
+    id: Uuid,
+    direction: &Direction,
+    error: &str,
+) {
+    if *direction == Direction::Pull {
+        state.transfer_receiver.signal_error(id, error.to_string()).await;
+    }
+    send_error(ws_tx, id, error);
+}
+
 pub async fn handle_browser_transfer(
     state: Arc<AppState>,
     id: Uuid,
@@ -106,7 +119,7 @@ pub async fn handle_browser_transfer(
             id,
         )
         .await;
-        send_error(&ws_tx, id, "Failed to send to remote");
+        abort_browser_transfer(&state, &ws_tx, id, &direction, "Failed to send to remote").await;
         return;
     }
     let (pending_requests, pending_request_order) = (
@@ -141,11 +154,12 @@ pub async fn handle_browser_transfer(
 
                     let wait_result = tokio::time::timeout(std::time::Duration::from_secs(1800), done_rx).await;
                     match wait_result {
-                        Err(_) => send_error(&ws_tx, id, "Pull transfer timed out"),
+                        Err(_) => abort_browser_transfer(&state, &ws_tx, id, &direction, "Pull transfer timed out").await,
                         Ok(Err(_recv_err)) => {
-                            send_error(&ws_tx, id, "Pull transfer channel closed unexpectedly")
+                            abort_browser_transfer(&state, &ws_tx, id, &direction, "Pull transfer channel closed unexpectedly").await
                         }
                         Ok(Ok(Err(error))) => {
+                            // Error was generated internally by transfer_receiver, so it already cleaned itself up
                             send_error(&ws_tx, id, &error);
                         }
                         Ok(Ok(Ok(total_bytes))) => {
@@ -163,9 +177,11 @@ pub async fn handle_browser_transfer(
                 }
             }
         }
-        Ok(Ok(ControlMessage::TransferError { error, .. })) => send_error(&ws_tx, id, &error),
-        Ok(Ok(_)) => send_error(&ws_tx, id, "Unexpected response from remote"),
-        Ok(Err(_)) => send_error(&ws_tx, id, "Remote response channel closed"),
+        Ok(Ok(ControlMessage::TransferError { error, .. })) => {
+            abort_browser_transfer(&state, &ws_tx, id, &direction, &error).await
+        }
+        Ok(Ok(_)) => abort_browser_transfer(&state, &ws_tx, id, &direction, "Unexpected response from remote").await,
+        Ok(Err(_)) => abort_browser_transfer(&state, &ws_tx, id, &direction, "Remote response channel closed").await,
         Err(_) => {
             let _ = crate::server::remove_pending_response(
                 &pending_requests,
@@ -173,7 +189,7 @@ pub async fn handle_browser_transfer(
                 id,
             )
             .await;
-            send_error(&ws_tx, id, "Remote response timeout");
+            abort_browser_transfer(&state, &ws_tx, id, &direction, "Remote response timeout").await;
         }
     }
 }
