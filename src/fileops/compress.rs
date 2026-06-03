@@ -84,7 +84,7 @@ pub fn compress_directory(
     } else {
         drift_dir = std::env::temp_dir()
             .join(".drift")
-            .join(uuid::Uuid::new_v4().to_string());
+            .join(format!(".drift-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&drift_dir)
             .map_err(|e| CompressError::Io(format!("Failed to create fallback temp dir: {}", e)))?;
         archive_path = drift_dir.join(&archive_name);
