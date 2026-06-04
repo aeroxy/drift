@@ -978,10 +978,14 @@ describe('drift destination_path staging', () => {
     await Promise.all([hostProc?.stop(), clientProc?.stop()]);
     // Ensure all directories in tmpRoot are writable before deletion
     // (In case a test set a folder to read-only and failed to restore it)
-    const { execSync } = await import('child_process');
     try {
-      execSync(`chmod -R 777 ${tmpRoot}`);
-      execSync(`rm -rf ${tmpRoot}`);
+      if (process.platform === 'win32') {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      } else {
+        const { execSync } = await import('child_process');
+        execSync(`chmod -R 777 "${tmpRoot}"`);
+        execSync(`rm -rf "${tmpRoot}"`);
+      }
     } catch (e) {
       // ignore
     }
