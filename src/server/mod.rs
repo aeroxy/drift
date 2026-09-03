@@ -482,17 +482,26 @@ pub async fn run(state: Arc<AppState>, port: Option<u16>) -> anyhow::Result<()> 
 }
 
 fn get_local_ip_addresses() -> Vec<std::net::IpAddr> {
-    use std::net::UdpSocket;
+    use std::net::IpAddr;
 
-    let mut ips = Vec::new();
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
 
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                ips.push(addr.ip());
-            }
-        }
-    }
+    let mut ips: Vec<IpAddr> = ifaces
+        .into_iter()
+        .map(|iface| iface.ip())
+        // IPv4 only: IPv6 link-local/temporary addresses are noise in the banner
+        .filter(|ip| matches!(ip, IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local()))
+        .collect();
 
+    ips.sort_by_key(|ip| (!is_private_lan(ip), ip.to_string()));
+    ips.dedup();
     ips
+}
+
+/// RFC1918 addresses first: that is the LAN address a user on the same wifi
+/// can actually reach, ahead of VPN/CGNAT ranges like Tailscale's 100.64/10.
+fn is_private_lan(ip: &std::net::IpAddr) -> bool {
+    matches!(ip, std::net::IpAddr::V4(v4) if v4.is_private())
 }
