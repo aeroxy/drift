@@ -28,6 +28,17 @@ When typing in the remote address bar:
 2. Otherwise, the frontend calls `/api/browse-remote?path=<relative_parent>` to fetch remote directory entries via REST
 3. This avoids sending `BrowseRequest` messages over WebSocket, preventing side effects on the remote panel state
 
+### Selecting a suggestion
+
+Choosing a suggestion — by click or by Tab — fills the bar with `<path>/`, clears the old dropdown, and keeps the bar focused. The next debounced fetch then lists that directory's children, so you can keep drilling down.
+
+- **Click** also navigates the pane to the suggestion. The dropdown's `onMouseDown` calls `preventDefault()` to keep the input focused, which also skips the blur that normally re-syncs the bar to `cwd`; `PathBar` therefore updates the input text itself.
+- **Tab** only completes the text; press Enter to navigate.
+- **Enter** navigates to the highlighted suggestion (or the typed path) and blurs the bar, which then shows the resulting `cwd`.
+- **Escape** or clicking elsewhere blurs the bar and resets it to the current `cwd`.
+
+Clicking a folder row in the file list blurs the bar, which then syncs to the new `cwd`.
+
 ### Path normalization
 
 The frontend maintains `localRootDirRef` and `remoteRootDirRef` to track the root directories. When an absolute path is entered:

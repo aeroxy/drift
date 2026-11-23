@@ -53,6 +53,14 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
     return () => clearTimeout(debounceRef.current);
   }, [inputValue, fetchSuggestions, focused]);
 
+  // Put `path/` in the bar and drop the stale dropdown; the focused-input effect
+  // then fetches that directory's children so the user can keep drilling down.
+  const completeTo = (path: string) => {
+    setInputValue(path + "/");
+    setSuggestions([]);
+    setActiveIndex(-1);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -70,10 +78,7 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
     } else if (e.key === "Tab") {
       if (suggestions.length > 0) {
         e.preventDefault();
-        const selected = activeIndex >= 0 ? suggestions[activeIndex] : suggestions[0];
-        setInputValue(selected + "/");
-        setSuggestions([]);
-        setActiveIndex(-1);
+        completeTo(activeIndex >= 0 ? suggestions[activeIndex] : suggestions[0]);
       } else if (onTabComplete) {
         e.preventDefault();
         onTabComplete(inputValue);
@@ -107,8 +112,9 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
                     : "text-zinc-300 hover:bg-zinc-800"
                 }`}
                 onMouseDown={(e) => {
-                  e.preventDefault(); // prevent input blur before click registers
+                  e.preventDefault(); // keep input focused (and its blur-sync from firing), so sync the bar ourselves
                   onNavigateTo(s);
+                  completeTo(s);
                 }}
               >
                 {s}
