@@ -44,13 +44,20 @@ export default function PathBar({ hostname, cwd, connected, onRefresh, onNavigat
       setSuggestions([]);
       return;
     }
+    // clearTimeout can't cancel a lookup that already started, so also drop its result if
+    // this run was superseded (input changed, a suggestion was picked, or the bar blurred).
+    let cancelled = false;
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       const results = await fetchSuggestions(inputValue);
+      if (cancelled) return;
       setSuggestions(results);
       setActiveIndex(-1);
     }, 200);
-    return () => clearTimeout(debounceRef.current);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounceRef.current);
+    };
   }, [inputValue, fetchSuggestions, focused]);
 
   // Put `path/` in the bar and drop the stale dropdown; the focused-input effect
