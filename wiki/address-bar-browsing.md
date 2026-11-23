@@ -39,6 +39,8 @@ Choosing a suggestion — by click or by Tab — fills the bar with `<path>/`, c
 
 Clicking a folder row in the file list blurs the bar, which then syncs to the new `cwd`.
 
+A suggestion lookup that is still in flight when the input changes, a suggestion is picked, or the bar blurs is discarded when it returns, so a slow response (e.g. a remote host) can never repopulate the dropdown with entries for a path the bar no longer shows.
+
 ### Path normalization
 
 The frontend maintains `localRootDirRef` and `remoteRootDirRef` to track the root directories. When an absolute path is entered:
